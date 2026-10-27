@@ -6,3 +6,9 @@ __pycache__/
 downloads/
 route_cache.json
 xray_run.json
+diag_*.py
+dpi_strategy.json
+alive_chain.json
+node_*.json
+alive_chain.json
+last_run.txt
