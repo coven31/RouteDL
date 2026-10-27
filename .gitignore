@@ -1,0 +1,8 @@
+bin/
+list.txt
+alive.json
+__pycache__/
+*.exe
+downloads/
+route_cache.json
+xray_run.json
