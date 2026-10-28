@@ -60,8 +60,10 @@ def build_config(n, port):
         ss["httpupgradeSettings"] = {"path": q.get("path", "/"), "host": q.get("host", "")}
     elif net == "xhttp":
         ss["xhttpSettings"] = {"path": q.get("path", "/"), "host": q.get("host", ""), "mode": q.get("mode", "auto")}
-    elif net != "tcp":
+    elif net not in ("tcp", "raw"):
         return None
+    if net == "raw":
+        ss["network"] = "tcp"
     return {
         "log": {"loglevel": "none"},
         "inbounds": [{"listen": "127.0.0.1", "port": port, "protocol": "socks",
