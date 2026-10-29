@@ -12,3 +12,7 @@ alive_chain.json
 node_*.json
 alive_chain.json
 last_run.txt
+HANDOFF*.md
+routedl_cli_v4_backup.py
+report.jsonl
+routedl.json

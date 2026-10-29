@@ -1,6 +1,7 @@
-import argparse, json, os, random, re, socket, subprocess, sys, threading, time
+import argparse, hashlib, json, os, random, re, socket, subprocess, sys, threading, time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from urllib.parse import urlsplit
 
 import probe_nodes as pn
@@ -8,23 +9,46 @@ import probe_nodes as pn
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 T0 = time.time()
 
-BASE = r"C:\RouteDL"
-BIN = BASE + r"\bin"
-DOWNLOADS = BASE + r"\downloads"
-CIADPI = BIN + r"\ciadpi.exe"
-CACHE = BASE + r"\route_cache.json"
-DPI_CACHE = BASE + r"\dpi_strategy.json"
-LIST_URLS = [
+
+def load_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+BIN = os.path.join(BASE, "bin")
+CFG = load_json(os.path.join(BASE, "routedl.json"), {})  # необязательный конфиг рядом со скриптом
+if not isinstance(CFG, dict):
+    CFG = {}
+DOWNLOADS = CFG.get("downloads") or os.path.join(BASE, "downloads")
+CIADPI = os.path.join(BIN, "ciadpi.exe")
+CACHE = os.path.join(BASE, "route_cache.json")
+DPI_CACHE = os.path.join(BASE, "dpi_strategy.json")
+REPORT = os.path.join(BASE, "report.jsonl")
+LIST_URLS = CFG.get("list_urls") or [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
     "https://cdn.jsdelivr.net/gh/igareck/vpn-configs-for-russia@main/BLACK_VLESS_RUS.txt",
 ]
+pn.XRAY = os.path.join(BIN, "xray.exe")
+pn.LIST = os.path.join(BASE, "list.txt")
+pn.OUT = os.path.join(BASE, "alive.json")
 DPI_PORT = 10860
 DPI_URL = f"socks5h://127.0.0.1:{DPI_PORT}"  # socks5h: DNS-запросы тоже через прокси
 NODE_PORT0 = 21700
 CACHE_TTL = 24 * 3600
+RECHECK = 3 * 3600  # через столько часов не-прямой маршрут перепроверяется с прямого
+FIRST_STALL = 45  # с без первого результата на не-последнем маршруте (сайт отвечает, а файлы нет)
 ALIVE_TTL = 3600
 WANT_ALIVE = 8
-TOP_NODES = 16
+TOP_NODES = int(CFG.get("top_nodes") or 16)
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 CHAIN = {"port": DPI_PORT}
 
@@ -57,19 +81,6 @@ def log(msg):
 
 def err_lines(text):
     return "\n".join(l for l in text.splitlines() if "ERROR" in l or "][error]" in l.lower())
-
-
-def load_json(path, default):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return default
-
-
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
 
 
 def wait_port(port, tries=30):
@@ -117,7 +128,7 @@ def chained_build(n, port):
 
 
 def refresh_alive(chain=False, force=False):
-    path = BASE + (r"\alive_chain.json" if chain else r"\alive.json")
+    path = os.path.join(BASE, "alive_chain.json" if chain else "alive.json")
     if not force and os.path.exists(path) and time.time() - os.path.getmtime(path) < ALIVE_TTL:
         data = load_json(path, [])
         if data:
@@ -216,7 +227,7 @@ def pick_node(alive, origin, want_foreign):
             except OSError:
                 pass
     if best:
-        return (best["p"], best["port"], best["path"]), len(res)
+        return (best["p"], best["port"], best["path"], best["cc"]), len(res)
     return None, len(res)
 
 
@@ -235,16 +246,20 @@ def find_strategy(domain, origin):
     """Возвращает (процесс, стратегия, код ответа, порт) или (None, None, None, None)."""
     cache = load_json(DPI_CACHE, {})
     saved = cache.get(domain)
+    last = cache.get("*")  # последняя удачная стратегия для любого домена
     if saved:
         p = start_dpi(saved, DPI_PORT)
         if p:
             code = probe_origin(origin, DPI_URL, 6)
             if code is not None:
                 log(f"стратегия из кэша: {saved}")
+                cache["*"] = saved
+                save_json(DPI_CACHE, cache)
                 return p, saved, code, DPI_PORT
             p.kill()
             p.wait()
-    cands = [s for s in STRATEGIES if s != saved]
+    first = [last] if last and last != saved else []
+    cands = first + [s for s in STRATEGIES if s != saved and s not in first]
 
     def work(arg):
         k, s = arg
@@ -275,6 +290,7 @@ def find_strategy(domain, origin):
         r["p"].kill()
         r["p"].wait()
     cache[domain] = best["s"]
+    cache["*"] = best["s"]
     save_json(DPI_CACHE, cache)
     log(f"стратегия: {best['s']} (подошло {len(res)} из {len(cands)})")
     return best["p"], best["s"], best["code"], best["port"]
@@ -300,7 +316,7 @@ def build_cmd(tool, url, proxy, audio, cover, quality):
     r = "3" if proxy else "1"
     if tool == "yt":
         cmd = [sys.executable, "-m", "yt_dlp", "--no-colors", "--newline", "--progress-delta", "1",
-               "--ffmpeg-location", BIN, "-o", DOWNLOADS + r"\%(title)s [%(id)s].%(ext)s",
+               "--ffmpeg-location", BIN, "-o", os.path.join(DOWNLOADS, "%(title)s [%(id)s].%(ext)s"),
                "--http-chunk-size", "10M", "-N", "4",
                "--socket-timeout", t, "--retries", r, "--extractor-retries", r]
         if audio:
@@ -316,18 +332,20 @@ def build_cmd(tool, url, proxy, audio, cover, quality):
     return cmd + [url]
 
 
-def run(cmd, tool):
+def run(cmd, tool, first=None):
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                          encoding="utf-8", errors="replace", env=env)
     stall = 180 if tool == "gallery" else 150
-    state = {"last": time.time(), "killed": False}
+    state = {"last": time.time(), "killed": False, "seen": False, "limit": stall}
 
     def watchdog():
         while p.poll() is None:
             time.sleep(2)
-            if time.time() - state["last"] > stall:
+            limit = stall if (state["seen"] or not first) else first
+            if time.time() - state["last"] > limit:
                 state["killed"] = True
+                state["limit"] = limit
                 p.kill()
                 return
 
@@ -338,12 +356,18 @@ def run(cmd, tool):
         lines.append(line)
         is_file = bool(FILE_RE.match(line))
         files += is_file
-        if tool != "gallery" or is_file:
+        if tool == "gallery":
+            progress = is_file or line.startswith("# ")
+        else:
+            progress = line.startswith("[download]")
+        if progress:
+            state["seen"] = True
+        if tool != "gallery" or progress:
             state["last"] = time.time()
     p.wait()
     text = "".join(lines)
     if state["killed"]:
-        msg = f"ERROR: stalled, timed out: нет прогресса {stall} с, загрузка прервана"
+        msg = f"ERROR: stalled, timed out: нет прогресса {state['limit']} с, загрузка прервана"
         print(msg)
         return 1, text + "\n" + msg, files
     return p.returncode, text, files
@@ -351,18 +375,19 @@ def run(cmd, tool):
 
 def run_job(ctx, proxy):
     cmd = build_cmd(ctx["tool"], ctx["url"], proxy, ctx["audio"], ctx["cover"], ctx["quality"])
-    rc, text, files = run(cmd, ctx["tool"])
+    first = None if ctx.get("final") else FIRST_STALL
+    rc, text, files = run(cmd, ctx["tool"], first)
     passes = 1
     while rc != 0 and ctx["tool"] == "gallery" and files > 0 and passes < 3 \
             and "Failed to download" in text:
         passes += 1
         log(f"докачка пропущенных файлов (проход {passes})")
-        rc, text, files = run(cmd, ctx["tool"])
+        rc, text, files = run(cmd, ctx["tool"], first)
     return rc, text
 
 
 def rung_direct(ctx):
-    if probe_origin(ctx["origin"], None, 6) is None:
+    if probe_origin(ctx["origin"], None, 4) is None:
         log("напрямую: нет соединения с сайтом")
         return "skip", None, None
     rc, text = run_job(ctx, None)
@@ -377,6 +402,7 @@ def rung_dpi(ctx):
     if not proc:
         log("ни одна стратегия не сработала")
         return "skip", None, None
+    ctx["strategy"] = strat
     try:
         rc, text = run_job(ctx, f"socks5h://127.0.0.1:{port}")
         return "ran", rc, text
@@ -396,6 +422,7 @@ def rung_proxy(ctx):
         if not dpi:
             log("DPI-обход не поднялся, узлы недоступны")
             return "skip", None, None
+        ctx["strategy"] = strat
         CHAIN["port"] = port
         pn.build_config = chained_build
     try:
@@ -408,9 +435,12 @@ def rung_proxy(ctx):
         if not node:
             log("ни один узел не открывает этот сайт")
             return "skip", None, None
-        proc, port, path = node
+        proc, port, path, cc = node
+        if cc == "?":
+            cc = probe_country(f"socks5h://127.0.0.1:{port}")
+        ctx["cc"] = cc
         try:
-            log(f"выбран узел (порт {port})")
+            log(f"выбран узел (порт {port}, выход: {cc})")
             rc, text = run_job(ctx, f"socks5h://127.0.0.1:{port}")
             return "ran", rc, text
         finally:
@@ -435,12 +465,18 @@ def ladder(seq, start, ctx):
     i = start
     while i < len(seq):
         step = seq[i]
+        ctx["final"] = (i == len(seq) - 1)
         log(f"маршрут: {LABEL[step]}")
         if step == "dpi":
             net_blocked = True
         if step == "proxy":
             ctx["chain"] = ctx["force_chain"] or net_blocked or ctx["cached_chain"]
+        t_rung = time.time()
         st, rc, text = RUNGS[step](ctx)
+        ctx["trace"].append({"rung": step, "status": st, "rc": rc, "sec": round(time.time() - t_rung, 1),
+                             "strategy": ctx.pop("strategy", None),
+                             "chain": ctx["chain"] if step == "proxy" else None,
+                             "cc": ctx.pop("cc", None)})
         if st == "skip":
             if step == "direct":
                 net_blocked = True
@@ -455,6 +491,8 @@ def ladder(seq, start, ctx):
                 log("сайт отказал по IP или стране, пробую узлы")
                 i = seq.index("proxy")
                 continue
+            if "proxy" not in seq:
+                log("сайт отказал по IP или стране; резервные узлы выключены (включаются флагом --nodes)")
             return rc, step, False
         if NET_RE.search(errs) and i + 1 < len(seq):
             if step == "direct":
@@ -465,9 +503,52 @@ def ladder(seq, start, ctx):
     return 1, None, False
 
 
+def write_report(ctx, domain, rc, start):
+    rec = {"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "domain": domain, "tool": ctx["tool"],
+           "ok": rc == 0, "rc": rc, "sec": round(time.time() - T0), "start": start, "trace": ctx["trace"]}
+    try:
+        with open(REPORT, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def versions():
+    from importlib.metadata import version
+    out = []
+    for n in ("yt-dlp", "gallery-dl"):
+        try:
+            out.append(f"{n} {version(n)}")
+        except Exception:
+            pass
+    return ", ".join(out)
+
+
+def print_report(redact, n=15):
+    try:
+        with open(REPORT, encoding="utf-8") as f:
+            rows = [json.loads(l) for l in f.read().splitlines()[-n:] if l.strip()]
+    except (OSError, ValueError):
+        rows = []
+    if not rows:
+        print("отчёт пуст: сначала выполните несколько загрузок")
+        return
+    print(f"RouteDL: отчёт ({versions()}). Провайдер и ссылки не записываются; "
+          f"домены проверьте перед публикацией или используйте --redact")
+    for r in rows:
+        dom = "site-" + hashlib.sha1(r["domain"].encode()).hexdigest()[:6] if redact else r["domain"]
+        steps = " → ".join(
+            f'{t["rung"]}:{t["status"]}'
+            + (f'[{t["strategy"]}]' if t.get("strategy") else "")
+            + (f'/{t["cc"]}' if t.get("cc") else "")
+            + f'({t["sec"]}с)' for t in r["trace"])
+        res = "OK" if r["ok"] else f'СБОЙ rc={r["rc"]}'
+        print(f'{r["time"]} | {dom} | {res} | {r["sec"]} с | старт: {r["start"] or "direct"} | {steps}')
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("url")
+    ap.add_argument("url", nargs="?")
     ap.add_argument("--audio", choices=["best", "mp3", "flac", "wav", "m4a", "opus", "vorbis", "aac"])
     ap.add_argument("--quality", choices=["best", "1080", "720", "480"], default="1080")
     ap.add_argument("--route", choices=["auto", "direct", "dpi", "proxy"], default="auto")
@@ -475,7 +556,15 @@ def main():
     ap.add_argument("--cover", action="store_true", help="встроить обложку (mp3/m4a)")
     ap.add_argument("--chain", action="store_true", help="узлы через DPI-обход (для --route proxy)")
     ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--nodes", action="store_true", help="разрешить резервные узлы (по умолчанию выключены)")
+    ap.add_argument("--report", action="store_true", help="показать последние запуски (маршруты, стратегии, тайминги)")
+    ap.add_argument("--redact", action="store_true", help="с --report: скрыть названия сайтов")
     a = ap.parse_args()
+    if a.report:
+        print_report(a.redact)
+        return 0
+    if not a.url:
+        ap.error("нужна ссылка")
     os.makedirs(DOWNLOADS, exist_ok=True)
 
     host = (urlsplit(a.url).hostname or "").lower()
@@ -493,15 +582,24 @@ def main():
 
     ctx = {"tool": tool, "url": a.url, "audio": a.audio, "cover": a.cover, "quality": a.quality,
            "domain": domain, "origin": f"https://{host}/", "refresh": a.refresh,
-           "force_chain": a.chain, "chain": a.chain, "cached_chain": False, "want_foreign": False}
+           "force_chain": a.chain, "chain": a.chain, "cached_chain": False, "want_foreign": False,
+           "trace": [], "strategy": None, "cc": None}
 
-    seq = ["direct", "dpi", "proxy"] if a.route == "auto" else [a.route]
+    if a.route == "auto":
+        seq = ["direct", "dpi"] + (["proxy"] if (a.nodes or CFG.get("nodes")) else [])
+    else:
+        seq = [a.route]
     cache = load_json(CACHE, {})
     entry = cache.get(domain)
     cached = None
-    if a.route == "auto" and entry and time.time() - entry.get("ts", 0) < CACHE_TTL:
-        cached = entry.get("route")
-        ctx["cached_chain"] = bool(entry.get("chain"))
+    if a.route == "auto" and entry:
+        age = time.time() - entry.get("ts", 0)
+        if age < CACHE_TTL:
+            ctx["cached_chain"] = bool(entry.get("chain"))
+            if age < RECHECK:
+                cached = entry.get("route")
+            else:
+                log("запомненный маршрут старше 3 ч, перепроверяю с прямого")
     start = seq.index(cached) if cached in seq else 0
 
     rc, step, chain = ladder(seq, start, ctx)
@@ -514,8 +612,10 @@ def main():
         if step == "direct":
             cache.pop(domain, None)
         else:
-            cache[domain] = {"route": step, "chain": chain, "ts": time.time()}
+            ts = entry["ts"] if (cached and step == cached) else time.time()
+            cache[domain] = {"route": step, "chain": chain, "ts": ts}
         save_json(CACHE, cache)
+    write_report(ctx, domain, rc, cached)
     log(f"готово, код {rc}")
     return rc
 
