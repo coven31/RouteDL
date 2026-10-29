@@ -1,4 +1,6 @@
 yt-dlp[default]
+yt-dlp-ejs
 gallery-dl
 requests
 PySocks
+PySide6

@@ -18,9 +18,16 @@
 
 Если сайт отвечает, но файлы не приходят в течение 45 секунд, программа не ждёт дольше и переходит к следующему маршруту (последний маршрут ждёт до 3 минут). Удачный маршрут запоминается для сайта и перепроверяется с прямого каждые 3 часа. Движок выбирается автоматически: yt-dlp или gallery-dl, в зависимости от ссылки.
 
+## Возможности
+
+- Видео, аудио и галереи по одной ссылке, движок выбирается автоматически.
+- **Видео в аудио:** любое видео можно сохранить как MP3, FLAC, WAV или в исходном аудиоформате (подходит для подкастов, лекций, концертов).
+- В окне перед загрузкой показываются **реально доступные качества** (4K, 2K, 1080, 720, 480, 360, 240) и исходный формат звука с честной пометкой, есть ли потери.
+- По умолчанию качается только выбранный ролик, а не весь плейлист из ссылки; плейлист целиком включается отдельной галочкой.
+
 ## Установка (Windows, разработка)
 
-1. Python 3.12, `pip install -r requirements.txt`
+1. Python 3.12, `pip install -r requirements.txt` (в том числе PySide6 для окна и yt-dlp-ejs для YouTube)
 2. Положите в папку `bin\`: `xray.exe` ([Xray-core](https://github.com/XTLS/Xray-core/releases)), `ciadpi.exe` ([ByeDPI](https://github.com/hufrea/byedpi/releases)), `ffmpeg.exe` и `ffprobe.exe` ([сборка gyan.dev](https://www.gyan.dev/ffmpeg/builds/)).
 3. Для YouTube нужен JS-рантайм [Deno](https://deno.com): `winget install DenoLand.Deno`.
 
@@ -31,6 +38,9 @@ python routedl_cli.py "https://www.youtube.com/watch?v=..."
 python routedl_cli.py --quality 720 "https://vk.ru/video..."
 python routedl_cli.py --audio best "https://soundcloud.com/..."     # без пережатия
 python routedl_cli.py --audio mp3 --cover "https://soundcloud.com/..."
+python routedl_cli.py --audio mp3 "https://vk.ru/video..."           # аудиодорожка из видео
+python routedl_cli.py --playlist "https://www.youtube.com/playlist?list=..."
+python routedl_gui.py                                                # окно
 python routedl_cli.py --report                                       # последние запуски для issue
 ```
 
@@ -62,7 +72,7 @@ SoundCloud отдаёт сжатые потоки (чаще всего AAC 160 k
 
 ## Помогите проекту
 
-Самая полезная помощь: протестируйте RouteDL на своём провайдере. Запустите несколько загрузок, затем выполните `python routedl_cli.py --report --redact` и приложите вывод к issue.
+Если у вас другой провайдер: запустите несколько загрузок, затем `python routedl_cli.py --report --redact` и приложите вывод к issue.
 
 ## Права на контент
 
@@ -72,3 +82,7 @@ SoundCloud отдаёт сжатые потоки (чаще всего AAC 160 k
 
 Проект собран из чужих работ, спасибо авторам:
 yt-dlp (Unlicense), gallery-dl (GPLv2), ByeDPI (MIT), Xray-core (MPL-2.0), FFmpeg (GPLv3-сборка gyan.dev), публичные списки узлов igareck. RouteDL распространяется под GPL-3.0.
+
+## Поддержать автора
+
+Реквизиты для добровольных донатов: _(добавить)_

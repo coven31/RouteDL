@@ -311,14 +311,28 @@ def pick_tool(url):
     return ("yt" if yt else "gallery" if gd else None), yt, gd
 
 
-def build_cmd(tool, url, proxy, audio, cover, quality):
+def build_cmd(tool, url, proxy, audio, cover, quality, info=False, playlist=False, chunk=True, force=False):
     t = "25" if proxy else "8"
     r = "3" if proxy else "1"
     if tool == "yt":
+        if info:
+            cmd = [sys.executable, "-m", "yt_dlp", "--no-colors", "-J", "--flat-playlist", "--no-playlist",
+                   "--socket-timeout", t, "--retries", r, "--extractor-retries", r]
+            if proxy:
+                cmd += ["--proxy", proxy]
+            return cmd + [url]
+        if playlist:
+            out = os.path.join(DOWNLOADS, "%(playlist_title)s", "%(playlist_index)03d - %(title)s [%(id)s].%(ext)s")
+        else:
+            out = os.path.join(DOWNLOADS, "%(title)s [%(id)s].%(ext)s")
         cmd = [sys.executable, "-m", "yt_dlp", "--no-colors", "--newline", "--progress-delta", "1",
-               "--ffmpeg-location", BIN, "-o", os.path.join(DOWNLOADS, "%(title)s [%(id)s].%(ext)s"),
-               "--http-chunk-size", "10M", "-N", "4",
+               "--ffmpeg-location", BIN, "-o", out, "-N", "4",
+               "--yes-playlist" if playlist else "--no-playlist",
                "--socket-timeout", t, "--retries", r, "--extractor-retries", r]
+        if chunk and not audio:
+            cmd += ["--http-chunk-size", "10M"]  # против ограничения скорости на одно соединение
+        if force:
+            cmd += ["--force-overwrites"]
         if audio:
             cmd += ["-x", "--audio-format", audio, "--audio-quality", "0", "--embed-metadata"]
             if cover and audio in ("mp3", "m4a"):
@@ -332,7 +346,7 @@ def build_cmd(tool, url, proxy, audio, cover, quality):
     return cmd + [url]
 
 
-def run(cmd, tool, first=None):
+def run(cmd, tool, first=None, skip_json=False):
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                          encoding="utf-8", errors="replace", env=env)
@@ -352,7 +366,8 @@ def run(cmd, tool, first=None):
     threading.Thread(target=watchdog, daemon=True).start()
     lines, files = [], 0
     for line in p.stdout:
-        print(line, end="")
+        if not (skip_json and line.startswith("{")):
+            print(line, end="")
         lines.append(line)
         is_file = bool(FILE_RE.match(line))
         files += is_file
@@ -374,9 +389,21 @@ def run(cmd, tool, first=None):
 
 
 def run_job(ctx, proxy):
-    cmd = build_cmd(ctx["tool"], ctx["url"], proxy, ctx["audio"], ctx["cover"], ctx["quality"])
     first = None if ctx.get("final") else FIRST_STALL
+    if ctx["info"]:
+        cmd = build_cmd(ctx["tool"], ctx["url"], proxy, None, False, ctx["quality"], info=True)
+        rc, text, files = run(cmd, ctx["tool"], first, skip_json=True)
+        ctx["info_text"] = text
+        return rc, text
+    chunk = ctx["tool"] == "yt" and not ctx["audio"]
+    cmd = build_cmd(ctx["tool"], ctx["url"], proxy, ctx["audio"], ctx["cover"], ctx["quality"],
+                    playlist=ctx["playlist"], chunk=chunk)
     rc, text, files = run(cmd, ctx["tool"], first)
+    if chunk and "Conflicting range" in text:
+        log("поток HLS несовместим с докачкой кусками: повторяю без неё")
+        cmd = build_cmd(ctx["tool"], ctx["url"], proxy, ctx["audio"], ctx["cover"], ctx["quality"],
+                        playlist=ctx["playlist"], chunk=False, force=True)
+        rc, text, files = run(cmd, ctx["tool"], first)
     passes = 1
     while rc != 0 and ctx["tool"] == "gallery" and files > 0 and passes < 3 \
             and "Failed to download" in text:
@@ -503,6 +530,36 @@ def ladder(seq, start, ctx):
     return 1, None, False
 
 
+def summarize_info(text):
+    """Сжимает вывод yt-dlp -J до того, что нужно окну."""
+    data = None
+    for line in reversed(text.splitlines()):
+        if line.startswith("{"):
+            try:
+                data = json.loads(line)
+            except ValueError:
+                continue
+            break
+    if not isinstance(data, dict):
+        return None
+    out = {"tool": "yt", "title": data.get("title"),
+           "uploader": data.get("uploader") or data.get("channel"), "duration": data.get("duration")}
+    if data.get("_type") == "playlist":
+        entries = data.get("entries") or []
+        out["playlist"] = {"count": data.get("playlist_count") or len(entries)}
+        return out
+    fmts = data.get("formats") or []
+    out["heights"] = sorted({f["height"] for f in fmts
+                             if f.get("height") and f.get("vcodec") not in (None, "none")}, reverse=True)
+    has_audio = [f for f in fmts if f.get("acodec") not in (None, "none")]
+    pool = [f for f in has_audio if f.get("vcodec") in (None, "none")] or has_audio
+    if pool:
+        best = max(pool, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+        out["audio"] = {"codec": (best.get("acodec") or "").split(".")[0],
+                        "abr": round(best.get("abr") or best.get("tbr") or 0), "ext": best.get("ext")}
+    return out
+
+
 def write_report(ctx, domain, rc, start):
     rec = {"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "domain": domain, "tool": ctx["tool"],
            "ok": rc == 0, "rc": rc, "sec": round(time.time() - T0), "start": start, "trace": ctx["trace"]}
@@ -550,13 +607,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url", nargs="?")
     ap.add_argument("--audio", choices=["best", "mp3", "flac", "wav", "m4a", "opus", "vorbis", "aac"])
-    ap.add_argument("--quality", choices=["best", "1080", "720", "480"], default="1080")
+    ap.add_argument("--quality", choices=["best", "2160", "1440", "1080", "720", "480", "360", "240"],
+                    default="1080")
     ap.add_argument("--route", choices=["auto", "direct", "dpi", "proxy"], default="auto")
     ap.add_argument("--tool", choices=["auto", "yt", "gallery"], default="auto")
     ap.add_argument("--cover", action="store_true", help="встроить обложку (mp3/m4a)")
     ap.add_argument("--chain", action="store_true", help="узлы через DPI-обход (для --route proxy)")
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--nodes", action="store_true", help="разрешить резервные узлы (по умолчанию выключены)")
+    ap.add_argument("--info", action="store_true", help="только получить сведения о ролике (для окна)")
+    ap.add_argument("--playlist", action="store_true", help="скачать плейлист целиком (по умолчанию только ролик)")
     ap.add_argument("--report", action="store_true", help="показать последние запуски (маршруты, стратегии, тайминги)")
     ap.add_argument("--redact", action="store_true", help="с --report: скрыть названия сайтов")
     a = ap.parse_args()
@@ -579,11 +639,15 @@ def main():
     if a.audio and tool != "yt":
         log("--audio работает только с yt-dlp, игнорирую")
         a.audio = None
+    if a.info and tool != "yt":
+        print('[RouteDL-INFO] {"tool": "gallery"}', flush=True)
+        return 0
 
     ctx = {"tool": tool, "url": a.url, "audio": a.audio, "cover": a.cover, "quality": a.quality,
            "domain": domain, "origin": f"https://{host}/", "refresh": a.refresh,
            "force_chain": a.chain, "chain": a.chain, "cached_chain": False, "want_foreign": False,
-           "trace": [], "strategy": None, "cc": None}
+           "trace": [], "strategy": None, "cc": None,
+           "info": a.info, "playlist": a.playlist, "info_text": ""}
 
     if a.route == "auto":
         seq = ["direct", "dpi"] + (["proxy"] if (a.nodes or CFG.get("nodes")) else [])
@@ -615,6 +679,9 @@ def main():
             ts = entry["ts"] if (cached and step == cached) else time.time()
             cache[domain] = {"route": step, "chain": chain, "ts": ts}
         save_json(CACHE, cache)
+    if a.info and rc == 0:
+        print("[RouteDL-INFO] " + json.dumps(summarize_info(ctx.get("info_text", "")) or {},
+                                             ensure_ascii=False), flush=True)
     write_report(ctx, domain, rc, cached)
     log(f"готово, код {rc}")
     return rc
