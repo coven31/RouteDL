@@ -1,36 +1,51 @@
-"""RouteDL GUI (S4.2): окно поверх консольного ядра routedl_cli.py.
+"""RouteDL GUI (S4.3): окно поверх консольного ядра routedl_cli.py.
 
 Ядро запускается отдельными процессами, окно читает их вывод. Сначала `--info` узнаёт,
-что реально доступно у ролика (качества, исходное аудио, плейлист), потом идёт загрузка.
+что реально доступно (качества, исходное аудио, плейлист, число файлов галереи), потом идёт загрузка.
 """
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QPalette
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QPalette, QPixmap
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
+                               QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+                               QProgressBar, QPushButton, QToolButton, QVBoxLayout, QWidget)
+
+from routedl_icon import draw_icon
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(BASE, "routedl_cli.py")
 
+
+def hide_console(a):
+    """Дочерние процессы без мигающего окна консоли (CREATE_NO_WINDOW)."""
+    try:
+        a.flags |= 0x08000000
+    except Exception:
+        pass
+
+
+def child_python():
+    """Для дочерних процессов нужен консольный python.exe: у pythonw нет stdio."""
+    cand = os.path.join(os.path.dirname(sys.executable), "python.exe")
+    return cand if os.name == "nt" and os.path.exists(cand) else sys.executable
+
+
+PY = child_python()
+
 BUCKETS = [(2160, "4K"), (1440, "2K"), (1080, "1080"), (720, "720"), (480, "480"), (360, "360"), (240, "240")]
-AUDIO_FORMATS = [
-    ("MP3 (для плееров и техники)", "mp3"),
-    ("Оригинал (без перекодирования)", "best"),
-    ("FLAC", "flac"),
-    ("WAV", "wav"),
-]
 CODEC_NAMES = {"mp4a": "AAC", "aac": "AAC", "opus": "Opus", "mp3": "MP3", "vorbis": "Vorbis",
                "flac": "FLAC", "alac": "ALAC", "ac-3": "AC3", "ec-3": "E-AC3"}
 INFO_PREFIX = "[RouteDL-INFO] "
 ROUTE_RE = re.compile(r"\[RouteDL[^\]]*\]\s*маршрут:\s*(.+?)\s*$")
-PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)%")
+PERCENT_RE = re.compile(r"^\[download\]\s+(\d+(?:\.\d+)?)%")
+FILE_RE = re.compile(r"^[A-Za-z]:\\")
 BADGES = [
     ("напрямую", "Напрямую", "#2e7d32"),
     ("локальный DPI", "Обход DPI", "#1565c0"),
@@ -38,6 +53,8 @@ BADGES = [
 ]
 GREY = "#555555"
 HINT_COLOR = "#ffa726"
+GREEN_BAR = ("QProgressBar {border:1px solid #444; border-radius:3px; text-align:center; background:#1e1e1e;}"
+             "QProgressBar::chunk {background:#2e7d32;}")
 NODES_WARNING = ("Резервные узлы это публичные анонимные серверы.\n\n"
                  "Через них не передаются логины и cookies, но не вводите там пароли и личные данные.\n\n"
                  "Повторить загрузку через них один раз?")
@@ -95,6 +112,7 @@ class Window(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RouteDL")
+        self.setWindowIcon(QIcon(QPixmap.fromImage(draw_icon(256))))
         self.resize(900, 700)
         self.dl = None          # процесс загрузки
         self.info = None        # процесс получения сведений
@@ -104,6 +122,10 @@ class Window(QMainWindow):
         self.lines = []
         self.cancelled = False
         self.type_forced = False  # «Видео» заблокировано, т.к. у ссылки нет видеодорожки
+        self.gallery = False      # ссылка это галерея изображений
+        self.total = 0            # сколько файлов в галерее (0 = неизвестно)
+        self.done = 0
+        self.last_sub = ""        # video / audio / gallery: что открывать кнопкой «Открыть папку»
         self.last_clip = ""
 
         root = QWidget()
@@ -135,14 +157,16 @@ class Window(QMainWindow):
         self.pl_row.setVisible(False)
 
         # тип
-        row = QHBoxLayout()
+        self.type_row = QWidget()
+        row = QHBoxLayout(self.type_row)
+        row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(QLabel("Скачать как:"))
         self.type = QComboBox()
         self.type.addItems(["Видео", "Аудио"])
         self.type.currentIndexChanged.connect(self.on_type_changed)
         row.addWidget(self.type)
         row.addStretch(1)
-        lay.addLayout(row)
+        lay.addWidget(self.type_row)
 
         # видео: качества
         self.video_panel = QWidget()
@@ -168,28 +192,18 @@ class Window(QMainWindow):
         vp.addStretch(1)
         lay.addWidget(self.video_panel)
 
-        # аудио: формат
+        # аудио: формат выбирается сам (MP3, а если источник без потерь, то как в источнике)
         self.audio_panel = QWidget()
         ap = QVBoxLayout(self.audio_panel)
         ap.setContentsMargins(0, 0, 0, 0)
-        arow = QHBoxLayout()
-        arow.addWidget(QLabel("Формат:"))
-        self.audio_fmt = QComboBox()
-        for name, _ in AUDIO_FORMATS:
-            self.audio_fmt.addItem(name)
-        self.audio_fmt.currentIndexChanged.connect(self.update_audio_hint)
-        self.cover = QCheckBox("Встроить обложку (MP3)")
-        arow.addWidget(self.audio_fmt)
-        arow.addWidget(self.cover)
-        arow.addStretch(1)
-        ap.addLayout(arow)
         self.audio_src = QLabel("")
         self.audio_src.setWordWrap(True)
         ap.addWidget(self.audio_src)
         self.audio_hint = QLabel("")
         self.audio_hint.setWordWrap(True)
-        self.audio_hint.setStyleSheet(f"color:{HINT_COLOR};")
         ap.addWidget(self.audio_hint)
+        self.cover = QCheckBox("Встроить обложку (только MP3)")
+        ap.addWidget(self.cover)
         lay.addWidget(self.audio_panel)
         self.audio_panel.setVisible(False)
 
@@ -200,13 +214,22 @@ class Window(QMainWindow):
         self.cancel = QPushButton("Отмена")
         self.cancel.clicked.connect(self.stop)
         self.cancel.setEnabled(False)
-        self.open_btn = QPushButton("Открыть папку")
+        self.open_btn = QToolButton()
+        self.open_btn.setText("Открыть папку")
+        self.open_btn.setPopupMode(QToolButton.MenuButtonPopup)
         self.open_btn.clicked.connect(self.open_folder)
+        menu = QMenu(self.open_btn)
+        menu.addAction("Изменить папку загрузок…", self.choose_folder)
+        self.open_btn.setMenu(menu)
+        self.rep_btn = QPushButton("Отчёт")
+        self.rep_btn.setToolTip("Скопировать анонимный отчёт о последних запусках (для issue)")
+        self.rep_btn.clicked.connect(self.copy_report)
         self.nodes = QCheckBox("Резервные узлы (по умолчанию выключено)")
         self.nodes.setToolTip("Публичные анонимные узлы. Нужны, только если сайт отказывает по IP или стране.")
         btns.addWidget(self.go)
         btns.addWidget(self.cancel)
         btns.addWidget(self.open_btn)
+        btns.addWidget(self.rep_btn)
         btns.addSpacing(12)
         btns.addWidget(self.nodes)
         btns.addStretch(1)
@@ -243,9 +266,11 @@ class Window(QMainWindow):
         self.info_timer.setSingleShot(True)
         self.info_timer.timeout.connect(self.fetch_info)
 
+        self.update_audio_hint()
         self.clip = QGuiApplication.clipboard()
         self.clip.dataChanged.connect(self.on_clipboard)
         self.on_clipboard()
+        self.check_env()
 
     # ---------- оформление ----------
     def set_badge(self, text, color):
@@ -264,6 +289,26 @@ class Window(QMainWindow):
         blocked = not self.pl_row.isHidden() and not self.pl_check.isChecked()
         self.go.setEnabled(self.dl is None and not blocked)
 
+    def bar_idle(self):
+        """Полоса в исходном виде: у галереи с известным числом файлов зелёная шкала 0 / N."""
+        if self.gallery and self.total:
+            self.bar.setStyleSheet(GREEN_BAR)
+            self.bar.setFormat("%v / %m")
+            self.bar.setRange(0, self.total)
+        else:
+            self.bar.setStyleSheet("")
+            self.bar.setFormat("%p%")
+            self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+
+    def finish_bar(self, full):
+        if self.gallery and self.total:
+            self.bar.setRange(0, max(self.total, self.done))
+            self.bar.setValue(self.bar.maximum() if full else self.done)
+        else:
+            self.bar.setRange(0, 100)
+            self.bar.setValue(100 if full else 0)
+
     # ---------- буфер обмена и ссылка ----------
     def on_clipboard(self):
         text = (self.clip.text() or "").strip()
@@ -277,9 +322,11 @@ class Window(QMainWindow):
         if self.dl is None:
             self.info_timer.start(800)
 
-    # ---------- сведения о ролике ----------
+    # ---------- сведения о ссылке ----------
     def reset_info(self):
         self.info_data = None
+        self.gallery = False
+        self.total = 0
         self.title_lbl.setText("")
         self.pl_row.setVisible(False)
         self.pl_check.setChecked(False)
@@ -291,10 +338,12 @@ class Window(QMainWindow):
         if self.type_forced:
             self.type_forced = False
             self.type.setCurrentIndex(0)
+        self.type_row.setVisible(True)
         self.video_panel.setVisible(self.type.currentIndex() == 0)
         self.audio_panel.setVisible(self.type.currentIndex() == 1)
         self.audio_src.setText("")
         self.update_audio_hint()
+        self.bar_idle()
         self.update_go()
 
     def set_type_enabled(self, video, audio):
@@ -318,21 +367,28 @@ class Window(QMainWindow):
         self.kill_tree(stale)
         self.info_url = url
         self.reset_info()
-        self.title_lbl.setText("Получаю информацию о ролике…")
+        self.title_lbl.setText("Получаю информацию о ссылке…")
         args = ["-u", CLI, url, "--info"]
         if self.nodes.isChecked():
             args.append("--nodes")
         self.info = self.make_proc(args)
-        self.info.start(sys.executable, args)
+        self.info.start(PY, args)
 
     def apply_info(self, d):
         self.info_data = d
         if d.get("tool") != "yt":
-            self.title_lbl.setText("Галерея изображений: качество выбирать не нужно")
-            self.set_type_enabled(False, False)
+            self.gallery = True
+            self.total = int(d.get("count") or 0)
+            self.title_lbl.setText(f"Галерея изображений: {self.total} файлов" if self.total
+                                   else "Галерея изображений: считаю файлы…")
+            self.type_row.setVisible(False)
             self.video_panel.setVisible(False)
             self.audio_panel.setVisible(False)
+            self.pl_row.setVisible(False)
+            self.bar_idle()
+            self.update_go()
             return
+        self.type_row.setVisible(True)
         self.video_panel.setVisible(self.type.currentIndex() == 0)
         self.audio_panel.setVisible(self.type.currentIndex() == 1)
         parts = [d.get("title") or "", d.get("uploader") or "", fmt_duration(d.get("duration"))]
@@ -376,24 +432,24 @@ class Window(QMainWindow):
         self.update_audio_hint()
         self.update_go()
 
+    def audio_choice(self):
+        """(значение для --audio, подпись): MP3 по умолчанию, если у источника есть lossless, то он."""
+        codec = ((self.info_data or {}).get("audio") or {}).get("codec") or ""
+        if codec == "alac":
+            return "flac", "FLAC (без потерь)"
+        if codec == "flac":
+            return "best", "FLAC (без потерь, как в источнике)"
+        if codec.startswith("pcm"):
+            return "best", "WAV (без потерь, как в источнике)"
+        return "mp3", "MP3"
+
     def update_audio_hint(self, *_):
-        fmt = AUDIO_FORMATS[self.audio_fmt.currentIndex()][1]
-        audio = (self.info_data or {}).get("audio") or {}
-        codec = audio.get("codec") or ""
-        lossless = codec in ("flac", "alac") or codec.startswith("pcm")
-        if not self.info_data or not audio:
-            self.audio_hint.setText("")
-        elif fmt in ("flac", "wav") and not lossless:
-            self.audio_hint.setText("Источник уже сжат: FLAC или WAV не улучшат качество, файл станет в разы больше.")
-        elif fmt == "mp3" and not lossless:
-            self.audio_hint.setText("Источник уже сжат: перекодирование в MP3 сохранит качество не лучше источника.")
-        elif fmt == "best":
-            self.audio_hint.setText("Файл сохранится в исходном формате источника (без потерь на перекодировании).")
-        else:
-            self.audio_hint.setText("")
+        fmt, label = self.audio_choice()
+        self.audio_hint.setText("Сохранится как: " + label)
+        self.cover.setEnabled(fmt == "mp3")
 
     def on_type_changed(self, idx):
-        if self.info_data and self.info_data.get("tool") != "yt":
+        if self.gallery:
             return
         self.video_panel.setVisible(idx == 0)
         self.audio_panel.setVisible(idx == 1)
@@ -411,13 +467,17 @@ class Window(QMainWindow):
         env.insert("PYTHONIOENCODING", "utf-8")
         env.insert("PYTHONUTF8", "1")
         env.insert("PYTHONUNBUFFERED", "1")
+        env.insert("PATH", os.path.join(BASE, "bin") + os.pathsep + env.value("PATH"))
         p.setProcessEnvironment(env)
         p.setProcessChannelMode(QProcess.MergedChannels)
         p.setWorkingDirectory(BASE)
+        if os.name == "nt":
+            getattr(p, "setCreateProcessArgumentsModifier", lambda f: None)(hide_console)
         self.bufs[p] = ""
         p.readyReadStandardOutput.connect(lambda pr=p: self.on_output(pr))
         p.finished.connect(lambda code, _st, pr=p: self.on_finished(pr, code))
         p.errorOccurred.connect(lambda err, pr=p: self.on_error(pr, err))
+        p.finished.connect(p.deleteLater)
         return p
 
     def kill_tree(self, p):
@@ -446,12 +506,13 @@ class Window(QMainWindow):
         self.kill_tree(stale)
 
         args = ["-u", CLI, url]
-        if self.type.currentIndex() == 1:
-            fmt = AUDIO_FORMATS[self.audio_fmt.currentIndex()][1]
+        audio = not self.gallery and self.type.currentIndex() == 1
+        if audio:
+            fmt, _ = self.audio_choice()
             args += ["--audio", fmt]
             if self.cover.isChecked() and fmt == "mp3":
                 args.append("--cover")
-        else:
+        elif not self.gallery:
             q = self.selected_quality()
             if q:
                 args += ["--quality", str(q)]
@@ -460,18 +521,23 @@ class Window(QMainWindow):
         if force_nodes is True or self.nodes.isChecked():
             args.append("--nodes")
 
+        self.last_sub = "gallery" if self.gallery else "audio" if audio else "video"
         self.lines = []
+        self.done = 0
         self.cancelled = False
         self.log.clear()
         self.retry.setVisible(False)
         self.set_badge("подбор маршрута", GREY)
         self.set_status("Загрузка…")
-        self.bar.setRange(0, 0)  # «занято», пока нет процентов
+        if self.gallery and self.total:
+            self.bar_idle()
+        else:
+            self.bar.setRange(0, 0)  # «занято», пока нет процентов
         self.cancel.setEnabled(True)
         self.dl = self.make_proc(args)
         self.update_go()
         self.append("> routedl_cli.py " + " ".join(args[2:]))
-        self.dl.start(sys.executable, args)
+        self.dl.start(PY, args)
 
     def retry_with_nodes(self):
         answer = QMessageBox.question(self, "Резервные узлы", NODES_WARNING)
@@ -514,19 +580,26 @@ class Window(QMainWindow):
                 if route.startswith(key):
                     self.set_badge(label, color)
                     break
-        if kind == "dl" and line.startswith("[download]") and "%" in line:
-            pm = PERCENT_RE.search(line)
-            if pm:
-                if self.bar.maximum() == 0:
-                    self.bar.setRange(0, 100)
-                self.bar.setValue(int(float(pm.group(1))))
-                self.set_status(line[len("[download]"):].strip())
+        if kind == "dl" and self.gallery and (FILE_RE.match(line) or line.startswith("# ")):
+            self.done += 1  # скачанный файл или уже существующий («# путь»)
+            if self.total:
+                if self.done > self.bar.maximum():
+                    self.bar.setMaximum(self.done)
+                self.bar.setValue(self.done)
+            self.set_status(f"Файлов: {self.done}" + (f" из {self.total}" if self.total else ""))
+        pm = PERCENT_RE.match(line) if kind == "dl" else None
+        if pm:
+            if self.bar.maximum() == 0:
+                self.bar.setRange(0, 100)
+            self.bar.setValue(int(float(pm.group(1))))
+            self.set_status(line[len("[download]"):].strip())
             return  # строки прогресса не засоряют лог
         self.append(line)
 
     def on_error(self, p, err):
         if err == QProcess.FailedToStart and (p is self.dl or p is self.info):
-            self.append(f"Не удалось запустить Python: {sys.executable}")
+            self.append(f"Не удалось запустить {PY}: {p.errorString()}")
+            self.on_finished(p, 1)  # при FailedToStart сигнал finished не приходит: сбрасываем состояние сами
 
     def on_finished(self, p, code):
         kind = "dl" if p is self.dl else "info" if p is self.info else None
@@ -538,34 +611,77 @@ class Window(QMainWindow):
         if kind == "info":
             self.info = None
             if self.info_data is None:
+                self.info_url = ""
                 self.title_lbl.setText("")
-                self.set_status("Не удалось получить список форматов: будет выбрано «Авто»", HINT_COLOR)
+                self.set_status("Не удалось получить сведения: будут настройки по умолчанию", HINT_COLOR)
+            elif self.gallery and not self.total:
+                self.title_lbl.setText("Галерея изображений (число файлов узнать не удалось)")
             return
         text = "\n".join(self.lines)
         self.dl = None
         self.cancel.setEnabled(False)
-        self.bar.setRange(0, 100)
         if self.cancelled:
-            self.bar.setValue(0)
+            self.finish_bar(False)
             self.set_badge("отменено", GREY)
             self.set_status("Отменено")
         elif code == 0:
-            self.bar.setValue(100)
+            self.finish_bar(True)
             self.set_status("Готово: файлы в папке загрузок", "#66bb6a")
         else:
-            self.bar.setValue(0)
+            self.finish_bar(False)
             if "резервные узлы выключены" in text:
                 self.set_status("Сайт отказал по IP или стране. Можно попробовать резервные узлы.", HINT_COLOR)
                 self.retry.setVisible(True)
+            elif code == 2 and "ни один движок" in text:
+                self.set_status("Эта ссылка не поддерживается", "#ef5350")
             elif "stalled" in text and "нет прогресса" in text:
                 self.set_status("Нет прогресса, загрузка прервана", "#ef5350")
             else:
                 self.set_status(f"Ошибка (код {code}), подробности в логе", "#ef5350")
         self.update_go()
 
-    # ---------- папка ----------
+    # ---------- папка, отчёт, окружение ----------
+    def choose_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Папка загрузок", downloads_dir())
+        if not d:
+            return
+        path = os.path.join(BASE, "routedl.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg["downloads"] = os.path.normpath(d)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=1)
+        self.set_status("Папка загрузок: " + cfg["downloads"])
+
+    def copy_report(self):
+        r = subprocess.run([PY, CLI, "--report", "--redact"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", cwd=BASE,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                           env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1"))
+        QGuiApplication.clipboard().setText(r.stdout.strip() or "отчёт пуст")
+        self.set_status("Отчёт скопирован в буфер обмена: вставьте его в issue")
+
+    def check_env(self):
+        miss = [n for n in ("ffmpeg.exe", "ffprobe.exe", "ciadpi.exe")
+                if not os.path.exists(os.path.join(BASE, "bin", n))]
+        notes = []
+        if miss:
+            notes.append("нет в bin: " + ", ".join(miss))
+        if not (shutil.which("deno") or os.path.exists(os.path.join(BASE, "bin", "deno.exe"))):
+            notes.append("не найден Deno (нужен для YouTube)")
+        if notes:
+            self.set_status("Внимание: " + "; ".join(notes), HINT_COLOR)
+
     def open_folder(self):
-        d = downloads_dir()
+        base = downloads_dir()
+        d = os.path.join(base, self.last_sub) if self.last_sub else base
+        if not os.path.isdir(d):
+            d = base
         os.makedirs(d, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(d))
 
@@ -577,6 +693,9 @@ class Window(QMainWindow):
 
 
 def main():
+    if os.name == "nt":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("RouteDL.App")  # иконка в панели задач
     app = QApplication(sys.argv)
     apply_dark(app)
     w = Window()

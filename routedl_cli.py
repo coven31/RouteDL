@@ -147,6 +147,8 @@ def refresh_alive(chain=False, force=False):
             f.write(text)
     else:
         log("беру локальную копию списка")
+        if not os.path.exists(pn.LIST):
+            return []
     with open(pn.LIST, encoding="utf-8") as f:
         lines = [l for l in f if l.strip() and not l.lstrip().startswith("#")]
     nodes = [n for n in (pn.parse_vless(l) for l in lines) if n]
@@ -321,10 +323,11 @@ def build_cmd(tool, url, proxy, audio, cover, quality, info=False, playlist=Fals
             if proxy:
                 cmd += ["--proxy", proxy]
             return cmd + [url]
+        root = os.path.join(DOWNLOADS, "audio" if audio else "video")
         if playlist:
-            out = os.path.join(DOWNLOADS, "%(playlist_title)s", "%(playlist_index)03d - %(title)s [%(id)s].%(ext)s")
+            out = os.path.join(root, "%(playlist_title)s", "%(playlist_index)03d - %(title)s [%(id)s].%(ext)s")
         else:
-            out = os.path.join(DOWNLOADS, "%(title)s [%(id)s].%(ext)s")
+            out = os.path.join(root, "%(title)s [%(id)s].%(ext)s")
         cmd = [sys.executable, "-m", "yt_dlp", "--no-colors", "--newline", "--progress-delta", "1",
                "--ffmpeg-location", BIN, "-o", out, "-N", "4",
                "--yes-playlist" if playlist else "--no-playlist",
@@ -334,13 +337,14 @@ def build_cmd(tool, url, proxy, audio, cover, quality, info=False, playlist=Fals
         if force:
             cmd += ["--force-overwrites"]
         if audio:
-            cmd += ["-x", "--audio-format", audio, "--audio-quality", "0", "--embed-metadata"]
+            cmd += ["-f", "ba/b", "-x", "--audio-format", audio, "--audio-quality", "0", "--embed-metadata"]
             if cover and audio in ("mp3", "m4a"):
                 cmd += ["--embed-thumbnail"]
         elif quality != "best":
             cmd += ["-S", f"res:{quality},ext:mp4:m4a"]
     else:
-        cmd = [sys.executable, "-m", "gallery_dl", "-d", DOWNLOADS, "--http-timeout", t, "-R", r]
+        cmd = [sys.executable, "-m", "gallery_dl", "--http-timeout", t, "-R", r]
+        cmd += ["-G"] if info else ["-d", os.path.join(DOWNLOADS, "gallery")]
     if proxy:
         cmd += ["--proxy", proxy]
     return cmd + [url]
@@ -366,7 +370,7 @@ def run(cmd, tool, first=None, skip_json=False):
     threading.Thread(target=watchdog, daemon=True).start()
     lines, files = [], 0
     for line in p.stdout:
-        if not (skip_json and line.startswith("{")):
+        if not (skip_json and line.startswith(("{", "http", "| "))):
             print(line, end="")
         lines.append(line)
         is_file = bool(FILE_RE.match(line))
@@ -392,7 +396,7 @@ def run_job(ctx, proxy):
     first = None if ctx.get("final") else FIRST_STALL
     if ctx["info"]:
         cmd = build_cmd(ctx["tool"], ctx["url"], proxy, None, False, ctx["quality"], info=True)
-        rc, text, files = run(cmd, ctx["tool"], first, skip_json=True)
+        rc, text, files = run(cmd, "info", first, skip_json=True)
         ctx["info_text"] = text
         return rc, text
     chunk = ctx["tool"] == "yt" and not ctx["audio"]
@@ -560,6 +564,11 @@ def summarize_info(text):
     return out
 
 
+def count_info(text):
+    n = sum(1 for l in text.splitlines() if l.lstrip("| ").startswith("http"))
+    return {"tool": "gallery", "count": n or None}
+
+
 def write_report(ctx, domain, rc, start):
     rec = {"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "domain": domain, "tool": ctx["tool"],
            "ok": rc == 0, "rc": rc, "sec": round(time.time() - T0), "start": start, "trace": ctx["trace"]}
@@ -581,6 +590,18 @@ def versions():
     return ", ".join(out)
 
 
+def report_salt():
+    """Случайная соль установки (в routedl.json): без неё хеш короткого домена подбирается перебором за секунды."""
+    path = os.path.join(BASE, "routedl.json")
+    cfg = load_json(path, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    if not cfg.get("salt"):
+        cfg["salt"] = os.urandom(8).hex()
+        save_json(path, cfg)
+    return cfg["salt"]
+
+
 def print_report(redact, n=15):
     try:
         with open(REPORT, encoding="utf-8") as f:
@@ -593,7 +614,7 @@ def print_report(redact, n=15):
     print(f"RouteDL: отчёт ({versions()}). Провайдер и ссылки не записываются; "
           f"домены проверьте перед публикацией или используйте --redact")
     for r in rows:
-        dom = "site-" + hashlib.sha1(r["domain"].encode()).hexdigest()[:6] if redact else r["domain"]
+        dom = "site-" + hashlib.sha1((report_salt() + r["domain"]).encode()).hexdigest()[:6] if redact else r["domain"]
         steps = " → ".join(
             f'{t["rung"]}:{t["status"]}'
             + (f'[{t["strategy"]}]' if t.get("strategy") else "")
@@ -641,7 +662,6 @@ def main():
         a.audio = None
     if a.info and tool != "yt":
         print('[RouteDL-INFO] {"tool": "gallery"}', flush=True)
-        return 0
 
     ctx = {"tool": tool, "url": a.url, "audio": a.audio, "cover": a.cover, "quality": a.quality,
            "domain": domain, "origin": f"https://{host}/", "refresh": a.refresh,
@@ -680,9 +700,10 @@ def main():
             cache[domain] = {"route": step, "chain": chain, "ts": ts}
         save_json(CACHE, cache)
     if a.info and rc == 0:
-        print("[RouteDL-INFO] " + json.dumps(summarize_info(ctx.get("info_text", "")) or {},
-                                             ensure_ascii=False), flush=True)
-    write_report(ctx, domain, rc, cached)
+        res = summarize_info(ctx.get("info_text", "")) if tool == "yt" else count_info(ctx.get("info_text", ""))
+        print("[RouteDL-INFO] " + json.dumps(res or {}, ensure_ascii=False), flush=True)
+    if not a.info:
+        write_report(ctx, domain, rc, cached)
     log(f"готово, код {rc}")
     return rc
 

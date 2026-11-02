@@ -16,3 +16,10 @@ HANDOFF*.md
 routedl_cli_v4_backup.py
 report.jsonl
 routedl.json
+
+build/
+dist/
+*.spec
+
+apply_patch*.py
+desktop.ini
