@@ -80,7 +80,13 @@ def log(msg):
 
 
 def err_lines(text):
-    return "\n".join(l for l in text.splitlines() if "ERROR" in l or "][error]" in l.lower())
+    """Строки ошибок. yt-dlp иногда печатает «ERROR:» отдельной строкой, а текст ошибки на следующей."""
+    out, prev = [], False
+    for l in text.splitlines():
+        if prev or "ERROR" in l or "][error]" in l.lower() or "Got error" in l:
+            out.append(l)
+        prev = l.strip() == "ERROR:"
+    return "\n".join(out)
 
 
 def wait_port(port, tries=30):
