@@ -41,6 +41,7 @@ def child_python():
 
 
 PY = child_python()
+QUEUE = os.environ.get("ROUTEDL_QUEUE") or os.path.join(BASE, "queue.json")  # переменная нужна автотестам
 
 BUCKETS = [(2160, "4K"), (1440, "2K"), (1080, "1080"), (720, "720"), (480, "480"), (360, "360"), (240, "240")]
 CODEC_NAMES = {"mp4a": "AAC", "aac": "AAC", "opus": "Opus", "mp3": "MP3", "vorbis": "Vorbis",
@@ -138,6 +139,7 @@ class Window(QMainWindow):
         self.total = 0            # сколько файлов в галерее (0 = неизвестно)
         self.last_sub = ""        # video / audio / gallery: что открывать кнопкой «Открыть папку»
         self.last_clip = ""
+        self.saved_q = None       # что записано в queue.json
         self.hold_until = 0.0     # до этого момента важное сообщение статуса не затирается прогрессом
 
         root = QWidget()
@@ -253,6 +255,10 @@ class Window(QMainWindow):
         self.retry.clicked.connect(self.retry_with_nodes)
         self.retry.setVisible(False)
         lay.addWidget(self.retry)
+        self.resume = QPushButton("Продолжить восстановленную очередь")
+        self.resume.clicked.connect(self.resume_queue)
+        self.resume.setVisible(False)
+        lay.addWidget(self.resume)
 
         # очередь
         self.q_box = QWidget()
@@ -305,6 +311,7 @@ class Window(QMainWindow):
         self.clip.dataChanged.connect(self.on_clipboard)
         self.on_clipboard()
         self.check_env()
+        self.load_queue()
 
     # ---------- оформление ----------
     def set_badge(self, text, color):
@@ -385,6 +392,43 @@ class Window(QMainWindow):
         if 0 <= row < len(self.jobs):
             self.qlist.setCurrentRow(row)
         self.q_box.setVisible(bool(self.jobs))
+        self.save_queue()
+
+    def save_queue(self):
+        """Ожидающие и идущее задания пишутся в queue.json: после сбоя или закрытия очередь не теряется."""
+        keys = ("url", "args", "title", "sub", "gallery", "total")
+        items = [{k: j[k] for k in keys} for j in self.jobs if j["state"] in ("wait", "run")]
+        if items == self.saved_q:
+            return
+        self.saved_q = items
+        try:
+            with open(QUEUE, "w", encoding="utf-8") as f:
+                json.dump(items, f, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
+    def load_queue(self):
+        try:
+            with open(QUEUE, encoding="utf-8") as f:
+                data = json.load(f)
+            for d in data:
+                if isinstance(d, dict) and isinstance(d.get("args"), list) and len(d["args"]) >= 3:
+                    d["args"][1] = CLI  # папка программы могла измениться
+                    self.jobs.append({"url": str(d.get("url") or ""), "args": [str(x) for x in d["args"]],
+                                      "title": str(d.get("title") or d.get("url") or ""),
+                                      "sub": str(d.get("sub") or "video"), "gallery": bool(d.get("gallery")),
+                                      "total": int(d.get("total") or 0), "state": "wait"})
+        except (OSError, ValueError, TypeError):
+            return
+        if self.jobs:
+            self.refresh_list()
+            self.resume.setVisible(True)
+            self.set_status(f"Восстановлена очередь: заданий {len(self.jobs)}. Продолжить или убрать лишнее.",
+                            HINT_COLOR, hold=True)
+
+    def resume_queue(self, *_):
+        self.resume.setVisible(False)
+        self.pump()
 
     def build_job(self):
         url = self.url.text().strip()
@@ -453,6 +497,7 @@ class Window(QMainWindow):
     def launch(self, job):
         self.cur = job
         job["state"] = "run"
+        self.resume.setVisible(False)
         self.last_sub = job["sub"]
         self.lines = []
         self.cancelled = False
@@ -792,6 +837,8 @@ class Window(QMainWindow):
                 self.retry_job = job
                 self.retry.setText("Повторить через резервные узлы: " + (job["title"][:50] if job else ""))
                 self.retry.setVisible(True)
+            elif code == 3:
+                self.set_status("Нет интернета или не работает сеть: проверьте подключение", "#ef5350")
             elif code == 2 and "ни один движок" in text:
                 self.set_status("Эта ссылка не поддерживается", "#ef5350")
             elif "stalled" in text and "нет прогресса" in text:

@@ -426,6 +426,10 @@ def run_job(ctx, proxy):
         passes += 1
         log(f"докачка пропущенных файлов (проход {passes})")
         rc, text, files = run(cmd, ctx["tool"], first)
+    if rc != 0 and ctx["tool"] == "yt" and ctx.get("final") and NET_RE.search(err_lines(text)):
+        log("последний маршрут не справился: повторяю осторожно (1 поток, таймаут 30 с)")
+        gentle = cmd[:-1] + ["-N", "1", "--socket-timeout", "30", "--retries", "3", "--extractor-retries", "3"] + cmd[-1:]
+        rc, text, files = run(gentle, ctx["tool"], first)
     return rc, text
 
 
@@ -636,6 +640,34 @@ def print_report(redact, n=15):
         print(f'{r["time"]} | {dom} | {res} | {r["sec"]} с | старт: {r["start"] or "direct"} | {steps}')
 
 
+def net_ok(host=None):
+    """Есть ли хоть какая-то связь с интернетом. Ошибаться можно только в сторону «есть»: ложный отказ
+    блокирует все загрузки, поэтому хватает любого успеха: системный DNS, TCP к публичным DNS (порт 53),
+    TCP к самому сайту."""
+    if os.environ.get("ROUTEDL_FORCE_OFFLINE"):  # для автотестов
+        return False
+
+    def dns():
+        try:
+            socket.getaddrinfo("ya.ru", 443)
+            return True
+        except OSError:
+            return False
+
+    def tcp(addr):
+        try:
+            socket.create_connection(addr, timeout=3).close()
+            return True
+        except OSError:
+            return False
+
+    probes = [dns] + [(lambda a=a: tcp(a)) for a in (("77.88.8.8", 53), ("8.8.8.8", 53), ("1.1.1.1", 53), ("9.9.9.9", 53))]
+    if host:
+        probes.append(lambda: tcp((host, 443)))
+    with ThreadPoolExecutor(len(probes)) as ex:
+        return any(ex.map(lambda f: f(), probes))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url", nargs="?")
@@ -681,6 +713,9 @@ def main():
            "trace": [], "strategy": None, "cc": None,
            "info": a.info, "playlist": a.playlist, "info_text": ""}
 
+    if not net_ok(host):
+        log("нет подключения к интернету или не работает сеть (это не проблема программы)")
+        return 3
     if a.route == "auto":
         seq = ["direct", "dpi"] + (["proxy"] if (a.nodes or CFG.get("nodes")) else [])
     else:

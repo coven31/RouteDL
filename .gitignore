@@ -29,3 +29,6 @@ soak_report.jsonl
 soak_logs/
 soak_downloads/
 design_refs/
+queue.json
+
+suite_report.jsonl
