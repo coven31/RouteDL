@@ -23,3 +23,9 @@ dist/
 
 apply_patch*.py
 desktop.ini
+
+soak_urls.txt
+soak_report.jsonl
+soak_logs/
+soak_downloads/
+design_refs/

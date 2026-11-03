@@ -1,7 +1,9 @@
-"""RouteDL GUI (S4.3): окно поверх консольного ядра routedl_cli.py.
+"""RouteDL GUI (S4.4): окно с очередью загрузок поверх консольного ядра routedl_cli.py.
 
-Ядро запускается отдельными процессами, окно читает их вывод. Сначала `--info` узнаёт,
-что реально доступно (качества, исходное аудио, плейлист, число файлов галереи), потом идёт загрузка.
+Ядро запускается отдельными процессами, окно читает их вывод. Сначала `--info` узнаёт, что реально
+доступно (качества, исходное аудио, плейлист, число файлов галереи), потом ссылка добавляется в очередь.
+Очередь идёт строго по одной загрузке (порты и маршрут общие). Сведения о новой ссылке запрашиваются
+параллельно с загрузкой, на сдвинутых портах (ROUTEDL_PORT_OFFSET), чтобы не мешать идущей загрузке.
 """
 import json
 import math
@@ -10,12 +12,13 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-                               QProgressBar, QPushButton, QToolButton, QVBoxLayout, QWidget)
+                               QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox,
+                               QPlainTextEdit, QProgressBar, QPushButton, QToolButton, QVBoxLayout, QWidget)
 
 from routedl_icon import draw_icon
 
@@ -43,14 +46,17 @@ BUCKETS = [(2160, "4K"), (1440, "2K"), (1080, "1080"), (720, "720"), (480, "480"
 CODEC_NAMES = {"mp4a": "AAC", "aac": "AAC", "opus": "Opus", "mp3": "MP3", "vorbis": "Vorbis",
                "flac": "FLAC", "alac": "ALAC", "ac-3": "AC3", "ec-3": "E-AC3"}
 INFO_PREFIX = "[RouteDL-INFO] "
+INFO_PORT_OFFSET = "300"  # запрос сведений живёт на портах +300 от рабочих
 ROUTE_RE = re.compile(r"\[RouteDL[^\]]*\]\s*маршрут:\s*(.+?)\s*$")
 PERCENT_RE = re.compile(r"^\[download\]\s+(\d+(?:\.\d+)?)%")
+ITEM_RE = re.compile(r"^\[download\]\s+Downloading item (\d+) of (\d+)")
 FILE_RE = re.compile(r"^[A-Za-z]:\\")
 BADGES = [
     ("напрямую", "Напрямую", "#2e7d32"),
     ("локальный DPI", "Обход DPI", "#1565c0"),
     ("через узлы", "Резервные узлы", "#ef6c00"),
 ]
+MARK = {"wait": "⏳", "run": "▶", "ok": "✔", "fail": "✖", "cancel": "■"}
 GREY = "#555555"
 HINT_COLOR = "#ffa726"
 GREEN_BAR = ("QProgressBar {border:1px solid #444; border-radius:3px; text-align:center; background:#1e1e1e;}"
@@ -113,20 +119,26 @@ class Window(QMainWindow):
         super().__init__()
         self.setWindowTitle("RouteDL")
         self.setWindowIcon(QIcon(QPixmap.fromImage(draw_icon(256))))
-        self.resize(900, 700)
-        self.dl = None          # процесс загрузки
-        self.info = None        # процесс получения сведений
+        self.resize(900, 760)
+        self.dl = None            # процесс текущей загрузки
+        self.cur = None           # задание, которое сейчас качается
+        self.run = {}             # состояние текущей загрузки: gallery, total, done, item
+        self.jobs = []            # очередь: {url, args, title, sub, gallery, total, state}
+        self.retry_job = None     # задание, которое можно повторить через резервные узлы
+        self.info = None          # процесс получения сведений
         self.info_data = None
-        self.info_url = ""
+        self.info_url = ""        # ссылка, для которой запрошены сведения
+        self.info_for = ""        # ссылка запущенного запроса
+        self.info_done_url = ""   # ссылка, по которой запрос завершён (успешно или нет)
         self.bufs = {}
         self.lines = []
         self.cancelled = False
         self.type_forced = False  # «Видео» заблокировано, т.к. у ссылки нет видеодорожки
-        self.gallery = False      # ссылка это галерея изображений
+        self.gallery = False      # текущая ссылка в поле это галерея изображений
         self.total = 0            # сколько файлов в галерее (0 = неизвестно)
-        self.done = 0
         self.last_sub = ""        # video / audio / gallery: что открывать кнопкой «Открыть папку»
         self.last_clip = ""
+        self.hold_until = 0.0     # до этого момента важное сообщение статуса не затирается прогрессом
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -134,7 +146,7 @@ class Window(QMainWindow):
 
         self.url = QLineEdit()
         self.url.setPlaceholderText("Вставьте ссылку на видео, аудио или галерею")
-        self.url.returnPressed.connect(self.start)
+        self.url.returnPressed.connect(self.add_job)
         self.url.textChanged.connect(self.on_url_changed)
         lay.addWidget(self.url)
 
@@ -209,9 +221,11 @@ class Window(QMainWindow):
 
         # кнопки
         btns = QHBoxLayout()
-        self.go = QPushButton("Скачать")
-        self.go.clicked.connect(self.start)
+        self.go = QPushButton("В очередь")
+        self.go.setToolTip("Добавить в очередь: загрузки идут по одной, друг за другом")
+        self.go.clicked.connect(self.add_job)
         self.cancel = QPushButton("Отмена")
+        self.cancel.setToolTip("Отменить текущую загрузку (очередь продолжится)")
         self.cancel.clicked.connect(self.stop)
         self.cancel.setEnabled(False)
         self.open_btn = QToolButton()
@@ -239,6 +253,26 @@ class Window(QMainWindow):
         self.retry.clicked.connect(self.retry_with_nodes)
         self.retry.setVisible(False)
         lay.addWidget(self.retry)
+
+        # очередь
+        self.q_box = QWidget()
+        qv = QVBoxLayout(self.q_box)
+        qv.setContentsMargins(0, 0, 0, 0)
+        self.qlist = QListWidget()
+        self.qlist.setMaximumHeight(110)
+        qv.addWidget(self.qlist)
+        qrow = QHBoxLayout()
+        self.rm_btn = QPushButton("Убрать выбранное")
+        self.rm_btn.setToolTip("Ожидающее убирается из очереди, текущая загрузка отменяется")
+        self.rm_btn.clicked.connect(self.remove_selected)
+        self.clear_btn = QPushButton("Очистить завершённые")
+        self.clear_btn.clicked.connect(self.clear_done)
+        qrow.addWidget(self.rm_btn)
+        qrow.addWidget(self.clear_btn)
+        qrow.addStretch(1)
+        qv.addLayout(qrow)
+        lay.addWidget(self.q_box)
+        self.q_box.setVisible(False)
 
         info = QHBoxLayout()
         self.badge = QLabel()
@@ -278,49 +312,210 @@ class Window(QMainWindow):
         self.badge.setStyleSheet(
             f"background:{color}; color:white; border-radius:8px; padding:3px 8px; font-weight:bold;")
 
-    def set_status(self, text, color=None):
+    def set_status(self, text, color=None, hold=False):
+        if hold:
+            self.hold_until = time.monotonic() + 4
+        elif time.monotonic() < self.hold_until:
+            return
         self.status.setText(text)
         self.status.setStyleSheet(f"color:{color};" if color else "")
 
     def append(self, line):
         self.log.appendPlainText(line)
 
-    def update_go(self):
+    def update_go(self, *_):
         blocked = not self.pl_row.isHidden() and not self.pl_check.isChecked()
-        self.go.setEnabled(self.dl is None and not blocked)
+        self.go.setEnabled(not blocked)
+
+    # ---------- полоса прогресса ----------
+    def bar_plain(self):
+        self.bar.setStyleSheet("")
+        self.bar.setFormat("%p%")
+        self.bar.setRange(0, 100)
+
+    def bar_scale(self, n):
+        """Зелёная шкала «выполнено / всего» (галерея)."""
+        self.bar.setStyleSheet(GREEN_BAR)
+        self.bar.setFormat("%v / %m")
+        self.bar.setRange(0, max(n, 1))
+
+    def bar_overall(self, i, n, frac):
+        """Общий прогресс плейлиста: трек i из n, внутри трека доля frac."""
+        self.bar.setStyleSheet(GREEN_BAR)
+        self.bar.setFormat(f"трек {i} из {n}")
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(int(((i - 1) + max(0.0, min(frac, 1.0))) / max(n, 1) * 1000))
 
     def bar_idle(self):
-        """Полоса в исходном виде: у галереи с известным числом файлов зелёная шкала 0 / N."""
+        """Полоса вне загрузки: у галереи с известным числом файлов зелёная шкала 0 / N."""
+        if self.dl is not None:
+            return  # полоса принадлежит идущей загрузке
         if self.gallery and self.total:
-            self.bar.setStyleSheet(GREEN_BAR)
-            self.bar.setFormat("%v / %m")
-            self.bar.setRange(0, self.total)
+            self.bar_scale(self.total)
         else:
-            self.bar.setStyleSheet("")
-            self.bar.setFormat("%p%")
-            self.bar.setRange(0, 100)
+            self.bar_plain()
         self.bar.setValue(0)
 
     def finish_bar(self, full):
-        if self.gallery and self.total:
-            self.bar.setRange(0, max(self.total, self.done))
-            self.bar.setValue(self.bar.maximum() if full else self.done)
+        r = self.run
+        if r.get("gallery") and r.get("total"):
+            self.bar_scale(max(r["total"], r["done"]))
+            self.bar.setValue(self.bar.maximum() if full else r["done"])
+        elif r.get("item"):
+            i, n = r["item"]
+            if full:
+                self.bar_overall(n, n, 1.0)
+                self.bar.setFormat(f"треков: {n} из {n}")
         else:
-            self.bar.setRange(0, 100)
+            self.bar_plain()
             self.bar.setValue(100 if full else 0)
+
+    # ---------- очередь ----------
+    def refresh_list(self):
+        row = self.qlist.currentRow()
+        self.qlist.clear()
+        for j in self.jobs:
+            t = f'{MARK[j["state"]]} {j["title"]}'
+            if j["state"] == "run":
+                if self.run.get("item"):
+                    t += "  ·  трек {} из {}".format(*self.run["item"])
+                elif self.run.get("gallery") and self.run.get("total"):
+                    t += f'  ·  файлов {self.run["done"]} из {self.run["total"]}'
+            self.qlist.addItem(t)
+        if 0 <= row < len(self.jobs):
+            self.qlist.setCurrentRow(row)
+        self.q_box.setVisible(bool(self.jobs))
+
+    def build_job(self):
+        url = self.url.text().strip()
+        if not valid_url(url):
+            self.set_status("Вставьте ссылку, начинающуюся с http:// или https://", "#ef5350")
+            return None
+        if not os.path.exists(CLI):
+            self.set_status(f"Не найден {CLI}", "#ef5350")
+            return None
+        args = ["-u", CLI, url]
+        audio = not self.gallery and self.type.currentIndex() == 1
+        if audio:
+            fmt, _ = self.audio_choice()
+            args += ["--audio", fmt]
+            if self.cover.isChecked() and fmt == "mp3":
+                args.append("--cover")
+        elif not self.gallery:
+            q = self.selected_quality()
+            if q:
+                args += ["--quality", str(q)]
+        playlist = not self.pl_row.isHidden() and self.pl_check.isChecked()
+        if playlist:
+            args.append("--playlist")
+        if self.nodes.isChecked():
+            args.append("--nodes")
+        title = (self.info_data or {}).get("title") or url
+        if self.gallery:
+            title = "Галерея" + (f" ({self.total} файлов)" if self.total else "") + ": " + url.split("//", 1)[-1][:60]
+        if playlist:
+            title += " (плейлист, " + ("аудио)" if audio else "видео)")
+        elif audio:
+            title += " (аудио)"
+        return {"url": url, "args": args, "title": title, "state": "wait",
+                "sub": "gallery" if self.gallery else "audio" if audio else "video",
+                "gallery": self.gallery, "total": self.total}
+
+    def add_job(self, *_):
+        if not self.go.isEnabled():
+            return
+        url = self.url.text().strip()
+        if valid_url(url) and url != self.info_done_url:
+            self.set_status("Получаю сведения о ссылке, повторите через секунду…", HINT_COLOR, hold=True)
+            self.info_timer.start(0)
+            return
+        job = self.build_job()
+        if job is None:
+            return
+        dup = next((k for k, j in enumerate(self.jobs)
+                    if j["args"] == job["args"] and j["state"] in ("wait", "run")), None)
+        if dup is not None:
+            self.qlist.setCurrentRow(dup)
+            self.set_status("Эта ссылка с такими же настройками уже в очереди (строка выделена)", HINT_COLOR, hold=True)
+            return
+        self.jobs.append(job)
+        self.refresh_list()
+        self.pump()
+
+    def pump(self):
+        """Запускает следующее ожидающее задание, если ничего не качается."""
+        if self.dl is not None:
+            return
+        job = next((j for j in self.jobs if j["state"] == "wait"), None)
+        if job is not None:
+            self.launch(job)
+
+    def launch(self, job):
+        self.cur = job
+        job["state"] = "run"
+        self.last_sub = job["sub"]
+        self.lines = []
+        self.cancelled = False
+        self.run = {"gallery": job["gallery"], "total": job["total"], "done": 0, "item": None}
+        self.log.clear()
+        self.set_badge("подбор маршрута", GREY)
+        self.set_status("Загрузка…")
+        if job["gallery"] and job["total"]:
+            self.bar_scale(job["total"])
+            self.bar.setValue(0)
+        else:
+            self.bar_plain()
+            self.bar.setRange(0, 0)  # «занято», пока нет процентов
+        self.cancel.setEnabled(True)
+        self.dl = self.make_proc(job["args"])
+        self.refresh_list()
+        self.append("> routedl_cli.py " + " ".join(job["args"][2:]))
+        self.dl.start(PY, job["args"])
+
+    def stop(self):
+        if self.dl is not None:
+            self.cancelled = True
+            self.set_status("Отмена…")
+            self.kill_tree(self.dl)
+
+    def remove_selected(self, *_):
+        row = self.qlist.currentRow()
+        if not 0 <= row < len(self.jobs):
+            return
+        if self.jobs[row]["state"] == "run":
+            self.stop()
+            return
+        del self.jobs[row]
+        self.refresh_list()
+
+    def clear_done(self, *_):
+        self.jobs = [j for j in self.jobs if j["state"] in ("wait", "run")]
+        self.refresh_list()
+
+    def retry_with_nodes(self):
+        j = self.retry_job
+        if j is None:
+            return
+        if QMessageBox.question(self, "Резервные узлы", NODES_WARNING) == QMessageBox.StandardButton.Yes:
+            nj = dict(j, args=j["args"] + ["--nodes"], state="wait", title=j["title"] + " (через узлы)")
+            self.retry.setVisible(False)
+            self.retry_job = None
+            self.jobs.append(nj)
+            self.refresh_list()
+            self.pump()
 
     # ---------- буфер обмена и ссылка ----------
     def on_clipboard(self):
         text = (self.clip.text() or "").strip()
         if not valid_url(text):
             return
-        if self.dl is None and (not self.url.text().strip() or self.url.text().strip() == self.last_clip):
+        cur = self.url.text().strip()
+        if not cur or cur == self.last_clip:
             self.url.setText(text)
         self.last_clip = text
 
     def on_url_changed(self, _text):
-        if self.dl is None:
-            self.info_timer.start(800)
+        self.info_timer.start(800)
 
     # ---------- сведения о ссылке ----------
     def reset_info(self):
@@ -353,29 +548,29 @@ class Window(QMainWindow):
 
     def fetch_info(self):
         url = self.url.text().strip()
-        if self.dl is not None:
-            return
         if not valid_url(url):
             stale, self.info = self.info, None
             self.kill_tree(stale)
-            self.info_url = ""
+            self.info_url = self.info_done_url = ""
             self.reset_info()
             return
         if url == self.info_url:
             return
         stale, self.info = self.info, None
         self.kill_tree(stale)
-        self.info_url = url
+        self.info_url = self.info_for = url
+        self.info_done_url = ""
         self.reset_info()
         self.title_lbl.setText("Получаю информацию о ссылке…")
         args = ["-u", CLI, url, "--info"]
         if self.nodes.isChecked():
             args.append("--nodes")
-        self.info = self.make_proc(args)
+        self.info = self.make_proc(args, info=True)
         self.info.start(PY, args)
 
     def apply_info(self, d):
         self.info_data = d
+        self.info_done_url = self.info_for  # сведения получены: не ждём завершения процесса
         if d.get("tool") != "yt":
             self.gallery = True
             self.total = int(d.get("count") or 0)
@@ -461,18 +656,21 @@ class Window(QMainWindow):
         return None
 
     # ---------- процессы ----------
-    def make_proc(self, args):
+    def make_proc(self, args, info=False):
         p = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONIOENCODING", "utf-8")
         env.insert("PYTHONUTF8", "1")
         env.insert("PYTHONUNBUFFERED", "1")
         env.insert("PATH", os.path.join(BASE, "bin") + os.pathsep + env.value("PATH"))
+        if info:
+            env.insert("ROUTEDL_PORT_OFFSET", INFO_PORT_OFFSET)
         p.setProcessEnvironment(env)
         p.setProcessChannelMode(QProcess.MergedChannels)
         p.setWorkingDirectory(BASE)
-        if os.name == "nt":
-            getattr(p, "setCreateProcessArgumentsModifier", lambda f: None)(hide_console)
+        modifier = getattr(p, "setCreateProcessArgumentsModifier", None)
+        if os.name == "nt" and modifier:
+            modifier(hide_console)
         self.bufs[p] = ""
         p.readyReadStandardOutput.connect(lambda pr=p: self.on_output(pr))
         p.finished.connect(lambda code, _st, pr=p: self.on_finished(pr, code))
@@ -490,65 +688,6 @@ class Window(QMainWindow):
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         else:
             p.kill()
-
-    def start(self, force_nodes=False):
-        if self.dl is not None or not self.go.isEnabled():
-            return
-        url = self.url.text().strip()
-        if not valid_url(url):
-            self.set_status("Вставьте ссылку, начинающуюся с http:// или https://", "#ef5350")
-            return
-        if not os.path.exists(CLI):
-            self.set_status(f"Не найден {CLI}", "#ef5350")
-            return
-        self.info_timer.stop()
-        stale, self.info = self.info, None  # завершение устаревшего процесса окно проигнорирует
-        self.kill_tree(stale)
-
-        args = ["-u", CLI, url]
-        audio = not self.gallery and self.type.currentIndex() == 1
-        if audio:
-            fmt, _ = self.audio_choice()
-            args += ["--audio", fmt]
-            if self.cover.isChecked() and fmt == "mp3":
-                args.append("--cover")
-        elif not self.gallery:
-            q = self.selected_quality()
-            if q:
-                args += ["--quality", str(q)]
-        if not self.pl_row.isHidden() and self.pl_check.isChecked():
-            args.append("--playlist")
-        if force_nodes is True or self.nodes.isChecked():
-            args.append("--nodes")
-
-        self.last_sub = "gallery" if self.gallery else "audio" if audio else "video"
-        self.lines = []
-        self.done = 0
-        self.cancelled = False
-        self.log.clear()
-        self.retry.setVisible(False)
-        self.set_badge("подбор маршрута", GREY)
-        self.set_status("Загрузка…")
-        if self.gallery and self.total:
-            self.bar_idle()
-        else:
-            self.bar.setRange(0, 0)  # «занято», пока нет процентов
-        self.cancel.setEnabled(True)
-        self.dl = self.make_proc(args)
-        self.update_go()
-        self.append("> routedl_cli.py " + " ".join(args[2:]))
-        self.dl.start(PY, args)
-
-    def retry_with_nodes(self):
-        answer = QMessageBox.question(self, "Резервные узлы", NODES_WARNING)
-        if answer == QMessageBox.StandardButton.Yes:
-            self.start(force_nodes=True)
-
-    def stop(self):
-        if self.dl is not None:
-            self.cancelled = True
-            self.set_status("Отмена…")
-            self.kill_tree(self.dl)
 
     # ---------- вывод ядра ----------
     def on_output(self, p):
@@ -574,25 +713,39 @@ class Window(QMainWindow):
         if kind == "dl":
             self.lines.append(line)
         m = ROUTE_RE.search(line)
-        if m:
+        if m and kind == "dl":
             route = m.group(1)
             for key, label, color in BADGES:
                 if route.startswith(key):
                     self.set_badge(label, color)
                     break
-        if kind == "dl" and self.gallery and (FILE_RE.match(line) or line.startswith("# ")):
-            self.done += 1  # скачанный файл или уже существующий («# путь»)
-            if self.total:
-                if self.done > self.bar.maximum():
-                    self.bar.setMaximum(self.done)
-                self.bar.setValue(self.done)
-            self.set_status(f"Файлов: {self.done}" + (f" из {self.total}" if self.total else ""))
+        r = self.run
+        if kind == "dl" and r.get("gallery") and (FILE_RE.match(line) or line.startswith("# ")):
+            r["done"] += 1  # скачанный файл или уже существующий («# путь»)
+            if r["total"]:
+                if r["done"] > self.bar.maximum():
+                    self.bar.setMaximum(r["done"])
+                self.bar.setValue(r["done"])
+            self.set_status(f"Файлов: {r['done']}" + (f" из {r['total']}" if r["total"] else ""))
+            self.refresh_list()
+        if kind == "dl":
+            im = ITEM_RE.match(line)
+            if im:
+                r["item"] = (int(im.group(1)), int(im.group(2)))
+                self.bar_overall(r["item"][0], r["item"][1], 0.0)
+                self.refresh_list()
         pm = PERCENT_RE.match(line) if kind == "dl" else None
         if pm:
-            if self.bar.maximum() == 0:
-                self.bar.setRange(0, 100)
-            self.bar.setValue(int(float(pm.group(1))))
-            self.set_status(line[len("[download]"):].strip())
+            pct = float(pm.group(1))
+            item = r.get("item")
+            if item:
+                self.bar_overall(item[0], item[1], pct / 100)
+            else:
+                if self.bar.maximum() == 0:
+                    self.bar.setRange(0, 100)
+                self.bar.setValue(int(pct))
+            prefix = f"Трек {item[0]} из {item[1]} · " if item else ""
+            self.set_status(prefix + line[len("[download]"):].strip())
             return  # строки прогресса не засоряют лог
         self.append(line)
 
@@ -610,27 +763,34 @@ class Window(QMainWindow):
             self.handle_line(kind, rest)
         if kind == "info":
             self.info = None
+            self.info_done_url = self.info_for
             if self.info_data is None:
                 self.info_url = ""
                 self.title_lbl.setText("")
-                self.set_status("Не удалось получить сведения: будут настройки по умолчанию", HINT_COLOR)
+                if self.dl is None:
+                    self.set_status("Не удалось получить сведения: будут настройки по умолчанию", HINT_COLOR)
             elif self.gallery and not self.total:
                 self.title_lbl.setText("Галерея изображений (число файлов узнать не удалось)")
             return
         text = "\n".join(self.lines)
-        self.dl = None
+        job, self.cur, self.dl = self.cur, None, None
         self.cancel.setEnabled(False)
         if self.cancelled:
             self.finish_bar(False)
             self.set_badge("отменено", GREY)
             self.set_status("Отменено")
+            state = "cancel"
         elif code == 0:
             self.finish_bar(True)
             self.set_status("Готово: файлы в папке загрузок", "#66bb6a")
+            state = "ok"
         else:
+            state = "fail"
             self.finish_bar(False)
             if "резервные узлы выключены" in text:
                 self.set_status("Сайт отказал по IP или стране. Можно попробовать резервные узлы.", HINT_COLOR)
+                self.retry_job = job
+                self.retry.setText("Повторить через резервные узлы: " + (job["title"][:50] if job else ""))
                 self.retry.setVisible(True)
             elif code == 2 and "ни один движок" in text:
                 self.set_status("Эта ссылка не поддерживается", "#ef5350")
@@ -638,7 +798,11 @@ class Window(QMainWindow):
                 self.set_status("Нет прогресса, загрузка прервана", "#ef5350")
             else:
                 self.set_status(f"Ошибка (код {code}), подробности в логе", "#ef5350")
+        if job is not None:
+            job["state"] = state
+        self.refresh_list()
         self.update_go()
+        self.pump()
 
     # ---------- папка, отчёт, окружение ----------
     def choose_folder(self):

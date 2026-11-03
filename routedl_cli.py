@@ -28,7 +28,7 @@ BIN = os.path.join(BASE, "bin")
 CFG = load_json(os.path.join(BASE, "routedl.json"), {})  # необязательный конфиг рядом со скриптом
 if not isinstance(CFG, dict):
     CFG = {}
-DOWNLOADS = CFG.get("downloads") or os.path.join(BASE, "downloads")
+DOWNLOADS = os.environ.get("ROUTEDL_DOWNLOADS") or CFG.get("downloads") or os.path.join(BASE, "downloads")
 CIADPI = os.path.join(BIN, "ciadpi.exe")
 CACHE = os.path.join(BASE, "route_cache.json")
 DPI_CACHE = os.path.join(BASE, "dpi_strategy.json")
@@ -40,9 +40,12 @@ LIST_URLS = CFG.get("list_urls") or [
 pn.XRAY = os.path.join(BIN, "xray.exe")
 pn.LIST = os.path.join(BASE, "list.txt")
 pn.OUT = os.path.join(BASE, "alive.json")
-DPI_PORT = 10860
+# окно сдвигает порты для запроса сведений, чтобы он не мешал идущей загрузке
+PORT_OFF = int(os.environ.get("ROUTEDL_PORT_OFFSET") or 0)
+pn.BASE_PORT = 21000 + PORT_OFF
+DPI_PORT = 10860 + PORT_OFF
 DPI_URL = f"socks5h://127.0.0.1:{DPI_PORT}"  # socks5h: DNS-запросы тоже через прокси
-NODE_PORT0 = 21700
+NODE_PORT0 = 21700 + PORT_OFF
 CACHE_TTL = 24 * 3600
 RECHECK = 3 * 3600  # через столько часов не-прямой маршрут перепроверяется с прямого
 FIRST_STALL = 45  # с без первого результата на не-последнем маршруте (сайт отвечает, а файлы нет)
@@ -348,6 +351,9 @@ def build_cmd(tool, url, proxy, audio, cover, quality, info=False, playlist=Fals
                 cmd += ["--embed-thumbnail"]
         elif quality != "best":
             cmd += ["-S", f"res:{quality},ext:mp4:m4a"]
+        extra = os.environ.get("ROUTEDL_YT_EXTRA")  # только для диагностики: доп. ключи yt-dlp (последний выигрывает)
+        if extra:
+            cmd += extra.split()
     else:
         cmd = [sys.executable, "-m", "gallery_dl", "--http-timeout", t, "-R", r]
         cmd += ["-G"] if info else ["-d", os.path.join(DOWNLOADS, "gallery")]
@@ -564,7 +570,7 @@ def summarize_info(text):
     has_audio = [f for f in fmts if f.get("acodec") not in (None, "none")]
     pool = [f for f in has_audio if f.get("vcodec") in (None, "none")] or has_audio
     if pool:
-        best = max(pool, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+        best = pool[-1]  # то, что выберет yt-dlp для «ba/b»: последний в его порядке сортировки
         out["audio"] = {"codec": (best.get("acodec") or "").split(".")[0],
                         "abr": round(best.get("abr") or best.get("tbr") or 0), "ext": best.get("ext")}
     return out
