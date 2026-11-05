@@ -33,7 +33,7 @@ If a site answers but files do not arrive within 45 s, RouteDL moves to the next
 ## Install (Windows)
 
 1. Download or clone this repository.
-2. Double-click `install.bat`. It installs Python 3.12 via winget if missing, then downloads xray, ByeDPI, ffmpeg and deno from their upstream releases (known SHA256 values are checked in `setup_env.ps1`).
+2. Double-click `install.bat`. It installs Python 3.12 via winget if missing, then downloads xray, ByeDPI, ffmpeg and deno from their upstream releases (downloads are compared against the tested SHA256 values in `setup_env.ps1`).
 3. Double-click `RouteDL.bat`.
 
 Antivirus software may flag `ciadpi.exe` and `xray.exe`, because they are network-bypass tools. Both tested builds showed 0 detections on VirusTotal. Whether to exclude them is your decision.

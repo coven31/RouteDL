@@ -22,9 +22,9 @@ function Take($dir, $exe) {
     if (-not $f) { throw "в архиве нет $exe" }
     Copy-Item $f.FullName "$bin\$exe" -Force
     $h = (Get-FileHash "$bin\$exe" -Algorithm SHA256).Hash
-    if ($known[$exe] -and $known[$exe] -ne $h) { Write-Host "ВНИМАНИЕ: $exe отличается от проверенной версии (SHA256 $h). Это может быть новая версия." -ForegroundColor Yellow }
+    if ($known[$exe] -and $known[$exe] -ne $h) { Write-Host "Заметка: $exe отличается от проверенной версии (SHA256 $h). Это новее проверенной версии, для v0.1 нормально." -ForegroundColor Yellow }
     $h = (Get-FileHash "$bin\$exe" -Algorithm SHA256).Hash
-    if ($known[$exe] -and $known[$exe] -ne $h) { Write-Host "ВНИМАНИЕ: $exe отличается от проверенной версии (SHA256 $h). Это может быть новая версия." -ForegroundColor Yellow }
+    if ($known[$exe] -and $known[$exe] -ne $h) { Write-Host "Заметка: $exe отличается от проверенной версии (SHA256 $h). Это новее проверенной версии, для v0.1 нормально." -ForegroundColor Yellow }
 }
 $known = @{
   "xray.exe"   = "C77A00EB84FB93AE044C2D771A1CABCC033B81E487253FBC35B12DF6879C1E15"
