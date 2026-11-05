@@ -63,6 +63,8 @@ Files go to `downloads\` next to the script. Optional `routedl.json`: `{"downloa
 
 ## Help wanted
 
+Quick network check (no downloads): `python routedl_cli.py --selftest` prints which sites open directly and which need the bypass. Paste the output into an issue.
+
 Run a few downloads, then `python routedl_cli.py --report --redact` (or the **Report** button) and attach the output to an issue. The report contains no links, and with `--redact` domains are replaced by salted hashes.
 
 ## Legal

@@ -363,6 +363,8 @@ def build_cmd(tool, url, proxy, audio, cover, quality, info=False, playlist=Fals
             cmd += ["--http-chunk-size", "10M"]  # против ограничения скорости на одно соединение
         if force:
             cmd += ["--force-overwrites"]
+        if playlist:  # повторная загрузка того же плейлиста докачивает только новое
+            cmd += ["--download-archive", os.path.join(DOWNLOADS, "archive_audio.txt" if audio else "archive_video.txt")]
         if audio:
             cmd += ["-f", "ba/b", "-x", "--audio-format", audio, "--audio-quality", "0", "--embed-metadata"]
             if cover and audio in ("mp3", "m4a"):
@@ -707,6 +709,31 @@ def net_ok(host=None):
         return any(ex.map(lambda f: f(), probes))
 
 
+SELFTEST = ["youtube.com", "soundcloud.com", "vk.com", "github.com", "cloudflare.com"]
+
+
+def selftest():
+    """Быстрая проверка сети без загрузок: что открывается напрямую, где помогает обход."""
+    print(f"RouteDL selftest ({versions()})", flush=True)
+    if not net_ok():
+        log("нет подключения к интернету или не работает сеть")
+        return 3
+    for d in SELFTEST:
+        origin = f"https://{d}/"
+        if probe_origin(origin, None, 5) is not None:
+            res = "открывается напрямую"
+        elif not os.path.exists(CIADPI):
+            res = "закрыт (нет ciadpi.exe)"
+        else:
+            proc, strat, _code, _port = find_strategy(d, origin)
+            if proc:
+                proc.kill()
+                proc.wait()
+            res = f"помогает обход: {strat}" if proc else "закрыт, ни одна стратегия не помогла"
+        print(f"{d:18} {res}", flush=True)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url", nargs="?")
@@ -722,11 +749,14 @@ def main():
     ap.add_argument("--info", action="store_true", help="только получить сведения о ролике (для окна)")
     ap.add_argument("--playlist", action="store_true", help="скачать плейлист целиком (по умолчанию только ролик)")
     ap.add_argument("--report", action="store_true", help="показать последние запуски (маршруты, стратегии, тайминги)")
+    ap.add_argument("--selftest", action="store_true", help="проверить сеть по нескольким сайтам (без загрузок)")
     ap.add_argument("--redact", action="store_true", help="с --report: скрыть названия сайтов")
     a = ap.parse_args()
     if a.report:
         print_report(a.redact)
         return 0
+    if a.selftest:
+        return selftest()
     if not a.url:
         ap.error("нужна ссылка")
     if not a.url.lower().startswith(("http://", "https://")):

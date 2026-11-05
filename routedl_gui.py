@@ -67,6 +67,29 @@ NODES_WARNING = ("Резервные узлы это публичные анон
                  "Повторить загрузку через них один раз?")
 
 
+EXPLAIN = [
+    (r"not a bot|Sign in to confirm you", "Сайт просит подтвердить, что вы не бот. Подождите несколько минут или смените сеть: вход в аккаунт RouteDL не поддерживает."),
+    (r"age.restricted|confirm your age", "Ролик с ограничением по возрасту: без входа в аккаунт его не скачать, а RouteDL логины и cookies не использует."),
+    (r"Private video", "Приватное видео: доступно только владельцу или по приглашению."),
+    (r"members.only|Join this channel", "Видео только для участников канала."),
+    (r"Video unavailable|video is unavailable|has been removed|no longer available", "Видео удалено или недоступно."),
+    (r"not available in your country|blocked it in your country|geo.restrict", "Видео недоступно в вашем регионе."),
+    (r"HTTP Error 429|Too Many Requests", "Сайт ограничил частоту запросов (429): подождите и повторите."),
+    (r"requested format is not available", "Выбранное качество недоступно: выберите «Авто»."),
+    (r"Premieres in|live event will begin|is upcoming", "Трансляция или премьера ещё не началась."),
+    (r"ffmpeg.{0,40}not found|ffmpeg is not installed", "Не найден ffmpeg: запустите install.bat."),
+    (r"DRM", "Поток защищён DRM: скачать его нельзя."),
+]
+
+
+def explain(text):
+    """Понятная причина сбоя по тексту ошибки yt-dlp (None, если не распознана)."""
+    for pat, msg in EXPLAIN:
+        if re.search(pat, text, re.I):
+            return msg
+    return None
+
+
 def nearest_bucket(h):
     return min(BUCKETS, key=lambda b: abs(math.log(h / b[0])))[0]
 
@@ -862,6 +885,8 @@ class Window(QMainWindow):
                 self.set_status("Эта ссылка не поддерживается", "#ef5350")
             elif "stalled" in text and "нет прогресса" in text:
                 self.set_status("Нет прогресса, загрузка прервана", "#ef5350")
+            elif explain(text):
+                self.set_status(explain(text) + " Подробности в логе.", "#ef5350")
             else:
                 self.set_status(f"Ошибка (код {code}), подробности в логе", "#ef5350")
         if job is not None:
