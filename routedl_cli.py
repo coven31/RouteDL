@@ -86,6 +86,9 @@ NET_RE = re.compile(
     r"proxyerror|connectionerror|stalled", re.I)
 HTTP_RE = re.compile(r"HTTP Error (403|451)|403 Forbidden|451 Unavailable", re.I)
 DISK_RE = re.compile(r"Errno 28|No space left", re.I)
+# ошибки самого ролика: смена маршрута не поможет, а повтор только тратит время и портит кэш маршрутов
+PERM_RE = re.compile(r"Video unavailable|video is unavailable|has been removed|no longer available|Private video|"
+                     r"members.only|Join this channel|age.restricted|confirm your age|Premieres in|live event will begin", re.I)
 POST_MARKS = ("[ExtractAudio]", "[Merger]", "[VideoConvertor]", "[FixupM4a]", "[FixupM3u8]", "[FixupM4v]",
               "[Metadata]", "[EmbedThumbnail]", "[ThumbnailsConvertor]")  # ffmpeg работает молча: это не зависание
 POST_STALL = 1800  # с без вывода во время конвертации (длинные записи кодируются минутами)
@@ -572,6 +575,10 @@ def ladder(seq, start, ctx):
         if DISK_RE.search(errs):
             log("закончилось место на диске: освободите место и повторите (скачанное сохранится)")
             return 5, step, False
+        if PERM_RE.search(errs):
+            ctx["perm"] = True
+            log("ролик недоступен на самом сайте: смена маршрута не поможет")
+            return rc, step, False
         if HTTP_RE.search(errs):
             ctx["want_foreign"] = True
             if "proxy" in seq and step != "proxy":
@@ -809,7 +816,7 @@ def main():
     start = seq.index(cached) if cached in seq else 0
 
     rc, step, chain = ladder(seq, start, ctx)
-    if rc not in (0, 5) and start > 0:
+    if rc not in (0, 5) and start > 0 and not ctx.get("perm"):
         log("запомненный маршрут не сработал, начинаю с прямого")
         cache.pop(domain, None)
         ctx["cached_chain"] = False

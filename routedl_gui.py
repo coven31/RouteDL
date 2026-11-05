@@ -274,6 +274,11 @@ class Window(QMainWindow):
         self.upd_btn.setToolTip("Обновить yt-dlp и gallery-dl: сайты ломают их раз в 1-3 недели")
         self.upd_btn.clicked.connect(self.update_engines)
         btns.addWidget(self.upd_btn)
+        self.st = None
+        self.st_btn = QPushButton("Тест сети")
+        self.st_btn.setToolTip("Проверить, какие сайты открываются напрямую и где помогает обход. Результат копируется в буфер")
+        self.st_btn.clicked.connect(self.run_selftest)
+        btns.addWidget(self.st_btn)
         btns.addSpacing(12)
         btns.addWidget(self.nodes)
         btns.addStretch(1)
@@ -949,6 +954,41 @@ class Window(QMainWindow):
         self.append(msg)
         self.set_status(msg, "#66bb6a" if code == 0 else "#ef5350", hold=True)
 
+    def run_selftest(self):
+        if self.dl is not None or self.st is not None:
+            self.set_status("Идёт загрузка или проверка: подождите", HINT_COLOR, hold=True)
+            return
+        p = self.st = QProcess(self)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONUTF8", "1")
+        p.setProcessEnvironment(env)
+        p.setProcessChannelMode(QProcess.MergedChannels)
+        p.setWorkingDirectory(BASE)
+        modifier = getattr(p, "setCreateProcessArgumentsModifier", None)
+        if os.name == "nt" and modifier:
+            modifier(hide_console)
+        p.finished.connect(lambda code, _s, pr=p: self.selftest_done(pr))
+        p.errorOccurred.connect(lambda e, pr=p: self.selftest_done(pr) if e == QProcess.FailedToStart else None)
+        p.finished.connect(p.deleteLater)
+        self.log.clear()
+        self.st_btn.setEnabled(False)
+        self.set_status("Проверяю сеть: до минуты…")
+        p.start(PY, ["-u", CLI, "--selftest"])
+
+    def selftest_done(self, p):
+        if p is not self.st:
+            return
+        self.st = None
+        self.st_btn.setEnabled(True)
+        out = bytes(p.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
+        if not out:
+            self.set_status("Не удалось выполнить проверку сети", "#ef5350", hold=True)
+            return
+        self.append(out)
+        QGuiApplication.clipboard().setText(out)
+        self.set_status("Результат скопирован в буфер обмена: вставьте его в issue", "#66bb6a", hold=True)
+
     def after_info(self):
         if getattr(self, "want_add", False):
             self.want_add = False
@@ -978,6 +1018,7 @@ class Window(QMainWindow):
         self.info_timer.stop()
         self.kill_tree(self.info)
         self.kill_tree(self.dl)
+        self.kill_tree(self.st)
         event.accept()
 
 
