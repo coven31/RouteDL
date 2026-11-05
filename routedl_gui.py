@@ -223,8 +223,8 @@ class Window(QMainWindow):
 
         # кнопки
         btns = QHBoxLayout()
-        self.go = QPushButton("В очередь")
-        self.go.setToolTip("Добавить в очередь: загрузки идут по одной, друг за другом")
+        self.go = QPushButton("Скачать")
+        self.go.setToolTip("Скачать. Несколько ссылок встанут в очередь и пойдут по одной")
         self.go.clicked.connect(self.add_job)
         self.cancel = QPushButton("Отмена")
         self.cancel.setToolTip("Отменить текущую загрузку (очередь продолжится)")
@@ -246,6 +246,11 @@ class Window(QMainWindow):
         btns.addWidget(self.cancel)
         btns.addWidget(self.open_btn)
         btns.addWidget(self.rep_btn)
+        self.upd = None
+        self.upd_btn = QPushButton("Обновить движки")
+        self.upd_btn.setToolTip("Обновить yt-dlp и gallery-dl: сайты ломают их раз в 1-3 недели")
+        self.upd_btn.clicked.connect(self.update_engines)
+        btns.addWidget(self.upd_btn)
         btns.addSpacing(12)
         btns.addWidget(self.nodes)
         btns.addStretch(1)
@@ -402,8 +407,9 @@ class Window(QMainWindow):
             return
         self.saved_q = items
         try:
-            with open(QUEUE, "w", encoding="utf-8") as f:
+            with open(QUEUE + ".tmp", "w", encoding="utf-8") as f:
                 json.dump(items, f, ensure_ascii=False, indent=1)
+            os.replace(QUEUE + ".tmp", QUEUE)
         except OSError:
             pass
 
@@ -470,7 +476,8 @@ class Window(QMainWindow):
             return
         url = self.url.text().strip()
         if valid_url(url) and url != self.info_done_url:
-            self.set_status("Получаю сведения о ссылке, повторите через секунду…", HINT_COLOR, hold=True)
+            self.want_add = True  # клик не теряется: задание добавится, когда придут сведения
+            self.set_status("Получаю сведения о ссылке…", HINT_COLOR, hold=True)
             self.info_timer.start(0)
             return
         job = self.build_job()
@@ -560,6 +567,7 @@ class Window(QMainWindow):
         self.last_clip = text
 
     def on_url_changed(self, _text):
+        self.want_add = False
         self.info_timer.start(800)
 
     # ---------- сведения о ссылке ----------
@@ -779,6 +787,14 @@ class Window(QMainWindow):
                 r["item"] = (int(im.group(1)), int(im.group(2)))
                 self.bar_overall(r["item"][0], r["item"][1], 0.0)
                 self.refresh_list()
+        if kind == "dl":
+            if line.startswith("[ExtractAudio] Destination"):
+                self.set_status("Конвертация в MP3: у длинных записей занимает несколько минут…")
+            elif line.startswith("[Merger]"):
+                self.set_status("Склейка видео и звука…")
+            elif "30-секундный фрагмент" in line:
+                self.set_status("Внимание: сайт отдаёт только 30-секундный фрагмент (трек платный или закрытый)",
+                                HINT_COLOR, hold=True)
         pm = PERCENT_RE.match(line) if kind == "dl" else None
         if pm:
             pct = float(pm.group(1))
@@ -809,6 +825,7 @@ class Window(QMainWindow):
         if kind == "info":
             self.info = None
             self.info_done_url = self.info_for
+            QTimer.singleShot(0, self.after_info)
             if self.info_data is None:
                 self.info_url = ""
                 self.title_lbl.setText("")
@@ -837,6 +854,8 @@ class Window(QMainWindow):
                 self.retry_job = job
                 self.retry.setText("Повторить через резервные узлы: " + (job["title"][:50] if job else ""))
                 self.retry.setVisible(True)
+            elif code == 5:
+                self.set_status("Не хватает места на диске: освободите место и повторите", "#ef5350")
             elif code == 3:
                 self.set_status("Нет интернета или не работает сеть: проверьте подключение", "#ef5350")
             elif code == 2 and "ни один движок" in text:
@@ -876,6 +895,40 @@ class Window(QMainWindow):
                            env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1"))
         QGuiApplication.clipboard().setText(r.stdout.strip() or "отчёт пуст")
         self.set_status("Отчёт скопирован в буфер обмена: вставьте его в issue")
+
+    def update_engines(self):
+        if self.dl is not None or self.upd is not None:
+            self.set_status("Идёт загрузка или обновление: подождите", HINT_COLOR, hold=True)
+            return
+        p = self.upd = QProcess(self)
+        p.setProcessChannelMode(QProcess.MergedChannels)
+        modifier = getattr(p, "setCreateProcessArgumentsModifier", None)
+        if os.name == "nt" and modifier:
+            modifier(hide_console)
+        p.finished.connect(lambda code, _s: self.engines_done(code))
+        p.errorOccurred.connect(lambda e: self.engines_done(1) if e == QProcess.FailedToStart else None)
+        p.finished.connect(p.deleteLater)
+        self.upd_btn.setEnabled(False)
+        self.set_status("Обновляю yt-dlp и gallery-dl…")
+        p.start(PY, ["-m", "pip", "install", "-U", "yt-dlp[default]", "yt-dlp-ejs", "gallery-dl"])
+
+    def engines_done(self, code):
+        self.upd = None
+        self.upd_btn.setEnabled(True)
+        try:
+            from importlib.metadata import version
+            v = f"yt-dlp {version('yt-dlp')}, gallery-dl {version('gallery-dl')}"
+        except Exception:
+            v = ""
+        msg = ("Движки обновлены: " + v) if code == 0 else "Не удалось обновить движки (сеть или pip)"
+        self.append(msg)
+        self.set_status(msg, "#66bb6a" if code == 0 else "#ef5350", hold=True)
+
+    def after_info(self):
+        if getattr(self, "want_add", False):
+            self.want_add = False
+            if self.info_done_url == self.url.text().strip():
+                self.add_job()
 
     def check_env(self):
         miss = [n for n in ("ffmpeg.exe", "ffprobe.exe", "ciadpi.exe")

@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$root = "C:\RouteDL"
+$root = $PSScriptRoot
 $bin = "$root\bin"
 $tmp = Join-Path $env:TEMP "routedl_setup"
 New-Item -ItemType Directory -Force -Path $bin, $tmp | Out-Null
@@ -21,6 +21,24 @@ function Take($dir, $exe) {
     $f = Get-ChildItem -Path $dir -Recurse -Filter $exe | Select-Object -First 1
     if (-not $f) { throw "в архиве нет $exe" }
     Copy-Item $f.FullName "$bin\$exe" -Force
+    $h = (Get-FileHash "$bin\$exe" -Algorithm SHA256).Hash
+    if ($known[$exe] -and $known[$exe] -ne $h) { Write-Host "ВНИМАНИЕ: $exe отличается от проверенной версии (SHA256 $h). Это может быть новая версия." -ForegroundColor Yellow }
+    $h = (Get-FileHash "$bin\$exe" -Algorithm SHA256).Hash
+    if ($known[$exe] -and $known[$exe] -ne $h) { Write-Host "ВНИМАНИЕ: $exe отличается от проверенной версии (SHA256 $h). Это может быть новая версия." -ForegroundColor Yellow }
+}
+$known = @{
+  "xray.exe"   = "C77A00EB84FB93AE044C2D771A1CABCC033B81E487253FBC35B12DF6879C1E15"
+  "ciadpi.exe" = "EB53CEEEB981CC6735AC24BB1E51E725280B86630E80FDF19DDC4EE4A5B54EF4"
+  "ffmpeg.exe" = "3256173F3F8BFFD7DF12227C68ADF68025EDB1832273A9530688A7BB1ED8EDEC"
+  "ffprobe.exe"= "F0D36ECBBDD3BCFAC3EFA078C96C7271C2E68B3810595552AC3B7F17E9A65C52"
+  "deno.exe"   = "84BA64A0EEEBDC921CDEA57D5780AF7C1E512BE19F7C024C0C27C3D583BAD502"
+}
+$known = @{
+  "xray.exe"   = "C77A00EB84FB93AE044C2D771A1CABCC033B81E487253FBC35B12DF6879C1E15"
+  "ciadpi.exe" = "EB53CEEEB981CC6735AC24BB1E51E725280B86630E80FDF19DDC4EE4A5B54EF4"
+  "ffmpeg.exe" = "3256173F3F8BFFD7DF12227C68ADF68025EDB1832273A9530688A7BB1ED8EDEC"
+  "ffprobe.exe"= "F0D36ECBBDD3BCFAC3EFA078C96C7271C2E68B3810595552AC3B7F17E9A65C52"
+  "deno.exe"   = "84BA64A0EEEBDC921CDEA57D5780AF7C1E512BE19F7C024C0C27C3D583BAD502"
 }
 function Gh-Url($repo, $pattern) {
     $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ "User-Agent" = "RouteDL" }
@@ -58,20 +76,3 @@ python --version
 python -m pip install -q -r "$root\requirements.txt"
 python -m yt_dlp --version
 python -m gallery_dl --version
-
-Write-Host "`n== Файлы и патчи в коде =="
-$checks = @(
-    @("routedl_cli.py", "def ladder"), @("routedl_cli.py", "count_info"), @("routedl_cli.py", "report_salt"),
-    @("routedl_cli.py", "ba/b"), @("routedl_cli.py", "not a.info"),
-    @("routedl_gui.py", "child_python"), @("routedl_gui.py", "draw_icon"), @("routedl_icon.py", "def draw_icon"),
-    @("probe_nodes.py", "def parse_vless"), @("requirements.txt", "PySide6")
-)
-foreach ($c in $checks) {
-    $p = "$root\$($c[0])"
-    $ok = (Test-Path $p) -and (Select-String -Path $p -Pattern ([regex]::Escape($c[1])) -Quiet)
-    "{0,-18} {1,-18} {2}" -f $c[0], $c[1], $(if ($ok) { "OK" } else { "НЕТ" })
-}
-
-Write-Host "`n== git =="
-git -C $root log --oneline -3
-git -C $root status --short

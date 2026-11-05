@@ -5,9 +5,10 @@ from urllib.parse import urlsplit, parse_qs
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-XRAY = r"C:\RouteDL\bin\xray.exe"
-LIST = r"C:\RouteDL\list.txt"
-OUT = r"C:\RouteDL\alive.json"
+_B = os.path.dirname(os.path.abspath(__file__))
+XRAY = os.path.join(_B, "bin", "xray.exe")
+LIST = os.path.join(_B, "list.txt")
+OUT = os.path.join(_B, "alive.json")
 TEST_URL = "https://www.gstatic.com/generate_204"
 WORKERS = 16
 BASE_PORT = 21000

@@ -1,4 +1,4 @@
-import argparse, hashlib, json, os, random, re, socket, subprocess, sys, threading, time
+import argparse, hashlib, json, os, random, re, shutil, socket, subprocess, sys, threading, time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -13,14 +13,26 @@ T0 = time.time()
 def load_json(path, default):
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        return data if isinstance(data, type(default)) else default
     except (OSError, ValueError):
         return default
 
 
 def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = f"{path}.{os.getpid()}.tmp"  # атомарно: параллельные процессы не портят файл
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
+    for _ in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError:
+            time.sleep(0.1)
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
 
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -73,6 +85,11 @@ NET_RE = re.compile(
     r"remotedisconnected|incompleteread|unable to download webpage|unable to download video data|"
     r"proxyerror|connectionerror|stalled", re.I)
 HTTP_RE = re.compile(r"HTTP Error (403|451)|403 Forbidden|451 Unavailable", re.I)
+DISK_RE = re.compile(r"Errno 28|No space left", re.I)
+POST_MARKS = ("[ExtractAudio]", "[Merger]", "[VideoConvertor]", "[FixupM4a]", "[FixupM3u8]", "[FixupM4v]",
+              "[Metadata]", "[EmbedThumbnail]", "[ThumbnailsConvertor]")  # ffmpeg работает молча: это не зависание
+POST_STALL = 1800  # с без вывода во время конвертации (длинные записи кодируются минутами)
+MIN_FREE = int(float(CFG.get("min_free_gb") or 2) * 2 ** 30)
 FILE_RE = re.compile(r"^[A-Za-z]:\\")
 
 ORIG_BUILD = pn.build_config
@@ -190,7 +207,7 @@ def pick_node(alive, origin, want_foreign):
         cfg = pn.build_config(n, port) if n else None
         if cfg is None:
             return None
-        path = os.path.join(BASE, f"node_{k}.json")
+        path = os.path.join(BASE, f"node_{port}.json")
         save_json(path, cfg)
         p = subprocess.Popen([pn.XRAY, "run", "-c", path], stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, creationflags=pn.NO_WINDOW)
@@ -339,6 +356,7 @@ def build_cmd(tool, url, proxy, audio, cover, quality, info=False, playlist=Fals
             out = os.path.join(root, "%(title)s [%(id)s].%(ext)s")
         cmd = [sys.executable, "-m", "yt_dlp", "--no-colors", "--newline", "--progress-delta", "1",
                "--ffmpeg-location", BIN, "-o", out, "-N", "4",
+               "--abort-on-unavailable-fragments",  # иначе недостающие куски молча пропускаются, файл выходит обрезанным
                "--yes-playlist" if playlist else "--no-playlist",
                "--socket-timeout", t, "--retries", r, "--extractor-retries", r]
         if chunk and not audio:
@@ -362,21 +380,29 @@ def build_cmd(tool, url, proxy, audio, cover, quality, info=False, playlist=Fals
     return cmd + [url]
 
 
+def kill_tree(p):
+    """Убивает процесс вместе с дочерними (yt-dlp запускает ffmpeg: без этого он остаётся сиротой и держит файлы)."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True, creationflags=pn.NO_WINDOW)
+    else:
+        p.kill()
+
+
 def run(cmd, tool, first=None, skip_json=False):
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                          encoding="utf-8", errors="replace", env=env)
     stall = 180 if tool == "gallery" else 150
-    state = {"last": time.time(), "killed": False, "seen": False, "limit": stall}
+    state = {"last": time.time(), "killed": False, "seen": False, "limit": stall, "post": False}
 
     def watchdog():
         while p.poll() is None:
             time.sleep(2)
-            limit = stall if (state["seen"] or not first) else first
+            limit = POST_STALL if state["post"] else (stall if (state["seen"] or not first) else first)
             if time.time() - state["last"] > limit:
                 state["killed"] = True
                 state["limit"] = limit
-                p.kill()
+                kill_tree(p)
                 return
 
     threading.Thread(target=watchdog, daemon=True).start()
@@ -385,6 +411,13 @@ def run(cmd, tool, first=None, skip_json=False):
         if not (skip_json and line.startswith(("{", "http", "| "))):
             print(line, end="")
         lines.append(line)
+        if line.startswith(POST_MARKS):
+            state["post"] = True
+        elif line.startswith(("[download]", "[info]")):
+            state["post"] = False
+        if line.startswith("[info]") and "preview" in line:
+            print("[RouteDL] предупреждение: сайт отдаёт только 30-секундный фрагмент этого трека "
+                  "(полная запись платная или закрытая)", flush=True)
         is_file = bool(FILE_RE.match(line))
         files += is_file
         if tool == "gallery":
@@ -512,7 +545,7 @@ def ladder(seq, start, ctx):
     i = start
     while i < len(seq):
         step = seq[i]
-        ctx["final"] = (i == len(seq) - 1)
+        ctx["final"] = (i == len(seq) - 1) and start == 0  # у кэшированного маршрута есть откат на прямой
         log(f"маршрут: {LABEL[step]}")
         if step == "dpi":
             net_blocked = True
@@ -520,10 +553,13 @@ def ladder(seq, start, ctx):
             ctx["chain"] = ctx["force_chain"] or net_blocked or ctx["cached_chain"]
         t_rung = time.time()
         st, rc, text = RUNGS[step](ctx)
+        errs = err_lines(text or "")
+        why = (None if not rc else "disk" if DISK_RE.search(errs) else "http" if HTTP_RE.search(errs)
+               else "net" if NET_RE.search(errs) else "other")
         ctx["trace"].append({"rung": step, "status": st, "rc": rc, "sec": round(time.time() - t_rung, 1),
                              "strategy": ctx.pop("strategy", None),
                              "chain": ctx["chain"] if step == "proxy" else None,
-                             "cc": ctx.pop("cc", None)})
+                             "cc": ctx.pop("cc", None), "err": why})
         if st == "skip":
             if step == "direct":
                 net_blocked = True
@@ -531,7 +567,9 @@ def ladder(seq, start, ctx):
             continue
         if rc == 0:
             return 0, step, (ctx["chain"] if step == "proxy" else False)
-        errs = err_lines(text)
+        if DISK_RE.search(errs):
+            log("закончилось место на диске: освободите место и повторите (скачанное сохранится)")
+            return 5, step, False
         if HTTP_RE.search(errs):
             ctx["want_foreign"] = True
             if "proxy" in seq and step != "proxy":
@@ -635,6 +673,7 @@ def print_report(redact, n=15):
             f'{t["rung"]}:{t["status"]}'
             + (f'[{t["strategy"]}]' if t.get("strategy") else "")
             + (f'/{t["cc"]}' if t.get("cc") else "")
+            + (f'!{t["err"]}' if t.get("err") else "")
             + f'({t["sec"]}с)' for t in r["trace"])
         res = "OK" if r["ok"] else f'СБОЙ rc={r["rc"]}'
         print(f'{r["time"]} | {dom} | {res} | {r["sec"]} с | старт: {r["start"] or "direct"} | {steps}')
@@ -690,7 +729,13 @@ def main():
         return 0
     if not a.url:
         ap.error("нужна ссылка")
+    if not a.url.lower().startswith(("http://", "https://")):
+        ap.error("ссылка должна начинаться с http:// или https://")
     os.makedirs(DOWNLOADS, exist_ok=True)
+    free = shutil.disk_usage(DOWNLOADS).free
+    if not a.info and free < MIN_FREE:
+        log(f"мало места на диске: свободно {free / 2 ** 30:.1f} ГБ, нужно не меньше {MIN_FREE / 2 ** 30:.0f} ГБ")
+        return 5
 
     host = (urlsplit(a.url).hostname or "").lower()
     domain = host.removeprefix("www.")
@@ -734,7 +779,7 @@ def main():
     start = seq.index(cached) if cached in seq else 0
 
     rc, step, chain = ladder(seq, start, ctx)
-    if rc != 0 and start > 0:
+    if rc not in (0, 5) and start > 0:
         log("запомненный маршрут не сработал, начинаю с прямого")
         cache.pop(domain, None)
         ctx["cached_chain"] = False

@@ -32,3 +32,12 @@ design_refs/
 queue.json
 
 suite_report.jsonl
+
+soak_urls.txt
+soak_report.jsonl
+suite_report.jsonl
+suite_summary.txt
+soak_logs/
+queue.json
+*.tmp
+*.xlsx
