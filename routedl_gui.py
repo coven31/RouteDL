@@ -78,6 +78,8 @@ EXPLAIN = [
     (r"requested format is not available", "Выбранное качество недоступно: выберите «Авто»."),
     (r"Premieres in|live event will begin|is upcoming", "Трансляция или премьера ещё не началась."),
     (r"ffmpeg.{0,40}not found|ffmpeg is not installed", "Не найден ffmpeg: запустите install.bat."),
+    (r"Unable to extract|Signature extraction failed|nsig extraction failed|JavaScript runtime",
+     "Сайт, вероятно, сменил защиту. Нажмите «Обновить движки» и повторите."),
     (r"DRM", "Поток защищён DRM: скачать его нельзя."),
 ]
 

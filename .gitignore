@@ -41,3 +41,4 @@ soak_logs/
 queue.json
 *.tmp
 *.xlsx
+runtime/

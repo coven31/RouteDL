@@ -71,8 +71,26 @@ foreach ($n in "xray.exe", "ciadpi.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe"
 }
 if (Test-Path "$bin\deno.exe") { & "$bin\deno.exe" --version | Select-Object -First 1 }
 
-Write-Host "`n== Python =="
-python --version
-python -m pip install -q -r "$root\requirements.txt"
-python -m yt_dlp --version
-python -m gallery_dl --version
+Write-Host "`n== Python (portable) =="
+$pyVer = "3.12.7"
+$pyDir = "$root\runtime\python"
+$py = "$pyDir\python.exe"
+if (-not (Test-Path $py)) {
+    $zip = Join-Path $tmp "python-embed.zip"
+    Write-Host "скачиваю Python $pyVer (portable, в папку runtime) ..."
+    Invoke-WebRequest -Uri "https://www.python.org/ftp/python/$pyVer/python-$pyVer-embed-amd64.zip" -OutFile $zip -UseBasicParsing
+    $pyHash = ""   # SHA256 архива: заполняется при выпуске
+    if ($pyHash -and ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $pyHash)) { throw "SHA256 Python не совпал: архив повреждён или подменён" }
+    New-Item -ItemType Directory -Force -Path $pyDir | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $pyDir -Force
+    $pth = Get-ChildItem $pyDir -Filter "python*._pth" | Select-Object -First 1
+    Set-Content -Path $pth.FullName -Value @("$($pth.BaseName).zip", ".", "..\..", "Lib\site-packages", "import site") -Encoding ASCII
+    $gp = Join-Path $tmp "get-pip.py"
+    Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $gp -UseBasicParsing
+    & $py $gp --no-warn-script-location
+}
+& $py --version
+Write-Host "устанавливаю зависимости (несколько минут, PySide6 большой) ..."
+& $py -m pip install -q --no-warn-script-location -r "$root\requirements.txt"
+& $py -m yt_dlp --version
+& $py -m gallery_dl --version
