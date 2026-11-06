@@ -79,7 +79,7 @@ if (-not (Test-Path $py)) {
     $zip = Join-Path $tmp "python-embed.zip"
     Write-Host "скачиваю Python $pyVer (portable, в папку runtime) ..."
     Invoke-WebRequest -Uri "https://www.python.org/ftp/python/$pyVer/python-$pyVer-embed-amd64.zip" -OutFile $zip -UseBasicParsing
-    $pyHash = ""   # SHA256 архива: заполняется при выпуске
+    $pyHash = "0D57BB6CB078B74D23DBFE91F77D6780D45BED328911609F1F7EE2BA1606BF44"   # SHA256 python-3.12.7-embed-amd64.zip (MD5 сверен с python.org)
     if ($pyHash -and ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $pyHash)) { throw "SHA256 Python не совпал: архив повреждён или подменён" }
     New-Item -ItemType Directory -Force -Path $pyDir | Out-Null
     Expand-Archive -Path $zip -DestinationPath $pyDir -Force

@@ -21,9 +21,65 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QToolButton, QVBoxLayout, QWidget)
 
 from routedl_icon import draw_icon
+import routedl_i18n as i18n
+from routedl_i18n import L, tr, tr_line, tr_title
+from PySide6.QtCore import QLocale
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(BASE, "routedl_cli.py")
+
+
+class TLabel(QLabel):
+    """QLabel помнит исходный (русский) текст и переводится при смене языка."""
+    def __init__(self, text=""):
+        super().__init__()
+        self.src = ""
+        self.setText(text)
+
+    def setText(self, text):
+        self.src = text
+        super().setText(tr(text))
+
+    def retr(self):
+        super().setText(tr(self.src))
+
+
+class TButton(QPushButton):
+    def __init__(self, text=""):
+        super().__init__()
+        self.src = self.tip = ""
+        self.setText(text)
+
+    def setText(self, text):
+        self.src = text
+        super().setText(tr(text))
+
+    def setToolTip(self, tip):
+        self.tip = tip
+        super().setToolTip(tr(tip))
+
+    def retr(self):
+        super().setText(tr(self.src))
+        super().setToolTip(tr(self.tip))
+
+
+class TCheck(QCheckBox):
+    def __init__(self, text=""):
+        super().__init__()
+        self.src = self.tip = ""
+        self.setText(text)
+
+    def setText(self, text):
+        self.src = text
+        super().setText(tr(text))
+
+    def setToolTip(self, tip):
+        self.tip = tip
+        super().setToolTip(tr(tip))
+
+    def retr(self):
+        super().setText(tr(self.src))
+        super().setToolTip(tr(self.tip))
 
 
 def hide_console(a):
@@ -60,6 +116,7 @@ BADGES = [
 MARK = {"wait": "⏳", "run": "▶", "ok": "✔", "fail": "✖", "cancel": "■"}
 GREY = "#555555"
 HINT_COLOR = "#ffa726"
+OK_COLOR = "#66bb6a"
 GREEN_BAR = ("QProgressBar {border:1px solid #444; border-radius:3px; text-align:center; background:#1e1e1e;}"
              "QProgressBar::chunk {background:#2e7d32;}")
 NODES_WARNING = ("Резервные узлы это публичные анонимные серверы.\n\n"
@@ -111,6 +168,28 @@ def valid_url(text):
     return t.startswith(("http://", "https://")) and "\n" not in t
 
 
+CFG_PATH = os.path.join(BASE, "routedl.json")
+
+
+def load_cfg():
+    try:
+        with open(CFG_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_cfg(**kv):
+    d = load_cfg()
+    d.update(kv)
+    try:
+        with open(CFG_PATH, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+
+
 def downloads_dir():
     try:
         with open(os.path.join(BASE, "routedl.json"), encoding="utf-8") as f:
@@ -138,6 +217,34 @@ def apply_dark(app):
     p.setColor(QPalette.Disabled, QPalette.Text, QColor(120, 120, 120))
     p.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(105, 105, 105))
     app.setPalette(p)
+
+
+def apply_theme(app, dark=True):
+    global HINT_COLOR, OK_COLOR, GREEN_BAR
+    if dark:
+        apply_dark(app)
+        HINT_COLOR, OK_COLOR, bar_bg = "#ffa726", "#66bb6a", "#1e1e1e"
+    else:
+        app.setStyle("Fusion")
+        p = QPalette()
+        p.setColor(QPalette.Window, QColor(243, 243, 243))
+        p.setColor(QPalette.WindowText, QColor(25, 25, 25))
+        p.setColor(QPalette.Base, QColor(255, 255, 255))
+        p.setColor(QPalette.AlternateBase, QColor(235, 235, 235))
+        p.setColor(QPalette.Text, QColor(25, 25, 25))
+        p.setColor(QPalette.Button, QColor(228, 228, 228))
+        p.setColor(QPalette.ButtonText, QColor(25, 25, 25))
+        p.setColor(QPalette.Highlight, QColor(21, 101, 192))
+        p.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+        p.setColor(QPalette.PlaceholderText, QColor(120, 120, 120))
+        p.setColor(QPalette.ToolTipBase, QColor(255, 255, 225))
+        p.setColor(QPalette.ToolTipText, QColor(25, 25, 25))
+        p.setColor(QPalette.Disabled, QPalette.Text, QColor(150, 150, 150))
+        p.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(160, 160, 160))
+        app.setPalette(p)
+        HINT_COLOR, OK_COLOR, bar_bg = "#e65100", "#2e7d32", "#ffffff"
+    GREEN_BAR = ("QProgressBar {border:1px solid #888; border-radius:3px; text-align:center; background:%s;}"
+                 "QProgressBar::chunk {background:#2e7d32;}" % bar_bg)
 
 
 class Window(QMainWindow):
@@ -171,13 +278,21 @@ class Window(QMainWindow):
         self.setCentralWidget(root)
         lay = QVBoxLayout(root)
 
+        top = QHBoxLayout()
+        top.addStretch(1)
+        self.theme_btn = QPushButton()
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        self.lang_btn = QPushButton()
+        self.lang_btn.clicked.connect(self.toggle_lang)
+        top.addWidget(self.theme_btn)
+        top.addWidget(self.lang_btn)
+        lay.addLayout(top)
         self.url = QLineEdit()
-        self.url.setPlaceholderText("Вставьте ссылку на видео, аудио или галерею")
         self.url.returnPressed.connect(self.add_job)
         self.url.textChanged.connect(self.on_url_changed)
         lay.addWidget(self.url)
 
-        self.title_lbl = QLabel("")
+        self.title_lbl = TLabel("")
         self.title_lbl.setWordWrap(True)
         self.title_lbl.setStyleSheet("font-weight:bold;")
         lay.addWidget(self.title_lbl)
@@ -186,9 +301,9 @@ class Window(QMainWindow):
         self.pl_row = QWidget()
         pl = QHBoxLayout(self.pl_row)
         pl.setContentsMargins(0, 0, 0, 0)
-        self.pl_label = QLabel("")
+        self.pl_label = TLabel("")
         self.pl_label.setStyleSheet(f"color:{HINT_COLOR};")
-        self.pl_check = QCheckBox("Скачать весь плейлист")
+        self.pl_check = TCheck("Скачать весь плейлист")
         self.pl_check.toggled.connect(self.update_go)
         pl.addWidget(self.pl_label, 1)
         pl.addWidget(self.pl_check)
@@ -199,7 +314,7 @@ class Window(QMainWindow):
         self.type_row = QWidget()
         row = QHBoxLayout(self.type_row)
         row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QLabel("Скачать как:"))
+        row.addWidget(TLabel("Скачать как:"))
         self.type = QComboBox()
         self.type.addItems(["Видео", "Аудио"])
         self.type.currentIndexChanged.connect(self.on_type_changed)
@@ -211,15 +326,15 @@ class Window(QMainWindow):
         self.video_panel = QWidget()
         vp = QHBoxLayout(self.video_panel)
         vp.setContentsMargins(0, 0, 0, 0)
-        vp.addWidget(QLabel("Качество:"))
+        vp.addWidget(TLabel("Качество:"))
         self.q_group = QButtonGroup(self)
         self.q_group.setExclusive(True)
         self.q_buttons = {}
-        auto = QPushButton("Авто")
+        auto = TButton("Авто")
         auto.setToolTip("Лучшее до 1080p")
         self.q_buttons[0] = auto
         for val, label in BUCKETS:
-            b = QPushButton(label)
+            b = TButton(label)
             b.setEnabled(False)
             self.q_buttons[val] = b
         for b in self.q_buttons.values():
@@ -235,23 +350,23 @@ class Window(QMainWindow):
         self.audio_panel = QWidget()
         ap = QVBoxLayout(self.audio_panel)
         ap.setContentsMargins(0, 0, 0, 0)
-        self.audio_src = QLabel("")
+        self.audio_src = TLabel("")
         self.audio_src.setWordWrap(True)
         ap.addWidget(self.audio_src)
-        self.audio_hint = QLabel("")
+        self.audio_hint = TLabel("")
         self.audio_hint.setWordWrap(True)
         ap.addWidget(self.audio_hint)
-        self.cover = QCheckBox("Встроить обложку (только MP3)")
+        self.cover = TCheck("Встроить обложку (только MP3)")
         ap.addWidget(self.cover)
         lay.addWidget(self.audio_panel)
         self.audio_panel.setVisible(False)
 
         # кнопки
         btns = QHBoxLayout()
-        self.go = QPushButton("Скачать")
+        self.go = TButton("Скачать")
         self.go.setToolTip("Скачать. Несколько ссылок встанут в очередь и пойдут по одной")
         self.go.clicked.connect(self.add_job)
-        self.cancel = QPushButton("Отмена")
+        self.cancel = TButton("Отмена")
         self.cancel.setToolTip("Отменить текущую загрузку (очередь продолжится)")
         self.cancel.clicked.connect(self.stop)
         self.cancel.setEnabled(False)
@@ -260,24 +375,24 @@ class Window(QMainWindow):
         self.open_btn.setPopupMode(QToolButton.MenuButtonPopup)
         self.open_btn.clicked.connect(self.open_folder)
         menu = QMenu(self.open_btn)
-        menu.addAction("Изменить папку загрузок…", self.choose_folder)
+        self.folder_act = menu.addAction("Изменить папку загрузок…", self.choose_folder)
         self.open_btn.setMenu(menu)
-        self.rep_btn = QPushButton("Отчёт")
+        self.rep_btn = TButton("Отчёт")
         self.rep_btn.setToolTip("Скопировать анонимный отчёт о последних запусках (для issue)")
         self.rep_btn.clicked.connect(self.copy_report)
-        self.nodes = QCheckBox("Резервные узлы (по умолчанию выключено)")
+        self.nodes = TCheck("Резервные узлы (по умолчанию выключено)")
         self.nodes.setToolTip("Публичные анонимные узлы. Нужны, только если сайт отказывает по IP или стране.")
         btns.addWidget(self.go)
         btns.addWidget(self.cancel)
         btns.addWidget(self.open_btn)
         btns.addWidget(self.rep_btn)
         self.upd = None
-        self.upd_btn = QPushButton("Обновить движки")
+        self.upd_btn = TButton("Обновить движки")
         self.upd_btn.setToolTip("Обновить yt-dlp и gallery-dl: сайты ломают их раз в 1-3 недели")
         self.upd_btn.clicked.connect(self.update_engines)
         btns.addWidget(self.upd_btn)
         self.st = None
-        self.st_btn = QPushButton("Тест сети")
+        self.st_btn = TButton("Тест сети")
         self.st_btn.setToolTip("Проверить, какие сайты открываются напрямую и где помогает обход. Результат копируется в буфер")
         self.st_btn.clicked.connect(self.run_selftest)
         btns.addWidget(self.st_btn)
@@ -286,11 +401,11 @@ class Window(QMainWindow):
         btns.addStretch(1)
         lay.addLayout(btns)
 
-        self.retry = QPushButton("Повторить через резервные узлы…")
+        self.retry = TButton("Повторить через резервные узлы…")
         self.retry.clicked.connect(self.retry_with_nodes)
         self.retry.setVisible(False)
         lay.addWidget(self.retry)
-        self.resume = QPushButton("Продолжить восстановленную очередь")
+        self.resume = TButton("Продолжить восстановленную очередь")
         self.resume.clicked.connect(self.resume_queue)
         self.resume.setVisible(False)
         lay.addWidget(self.resume)
@@ -303,10 +418,10 @@ class Window(QMainWindow):
         self.qlist.setMaximumHeight(110)
         qv.addWidget(self.qlist)
         qrow = QHBoxLayout()
-        self.rm_btn = QPushButton("Убрать выбранное")
+        self.rm_btn = TButton("Убрать выбранное")
         self.rm_btn.setToolTip("Ожидающее убирается из очереди, текущая загрузка отменяется")
         self.rm_btn.clicked.connect(self.remove_selected)
-        self.clear_btn = QPushButton("Очистить завершённые")
+        self.clear_btn = TButton("Очистить завершённые")
         self.clear_btn.clicked.connect(self.clear_done)
         qrow.addWidget(self.rm_btn)
         qrow.addWidget(self.clear_btn)
@@ -316,9 +431,9 @@ class Window(QMainWindow):
         self.q_box.setVisible(False)
 
         info = QHBoxLayout()
-        self.badge = QLabel()
+        self.badge = TLabel()
         self.set_badge("маршрут не выбран", GREY)
-        self.status = QLabel("Готов к работе")
+        self.status = TLabel("Готов к работе")
         self.status.setWordWrap(True)
         info.addWidget(self.badge)
         info.addWidget(self.status, 1)
@@ -347,6 +462,8 @@ class Window(QMainWindow):
         self.on_clipboard()
         self.check_env()
         self.load_queue()
+        self.dark = load_cfg().get("theme") != "light"
+        self.retranslate()
 
     # ---------- оформление ----------
     def set_badge(self, text, color):
@@ -363,7 +480,7 @@ class Window(QMainWindow):
         self.status.setStyleSheet(f"color:{color};" if color else "")
 
     def append(self, line):
-        self.log.appendPlainText(line)
+        self.log.appendPlainText(tr_line(line))
 
     def update_go(self, *_):
         blocked = not self.pl_row.isHidden() and not self.pl_check.isChecked()
@@ -384,7 +501,7 @@ class Window(QMainWindow):
     def bar_overall(self, i, n, frac):
         """Общий прогресс плейлиста: трек i из n, внутри трека доля frac."""
         self.bar.setStyleSheet(GREEN_BAR)
-        self.bar.setFormat(f"трек {i} из {n}")
+        self.bar.setFormat(L(f"трек {i} из {n}", f"track {i} of {n}"))
         self.bar.setRange(0, 1000)
         self.bar.setValue(int(((i - 1) + max(0.0, min(frac, 1.0))) / max(n, 1) * 1000))
 
@@ -407,7 +524,7 @@ class Window(QMainWindow):
             i, n = r["item"]
             if full:
                 self.bar_overall(n, n, 1.0)
-                self.bar.setFormat(f"треков: {n} из {n}")
+                self.bar.setFormat(L(f"треков: {n} из {n}", f"tracks: {n} of {n}"))
         else:
             self.bar_plain()
             self.bar.setValue(100 if full else 0)
@@ -417,12 +534,13 @@ class Window(QMainWindow):
         row = self.qlist.currentRow()
         self.qlist.clear()
         for j in self.jobs:
-            t = f'{MARK[j["state"]]} {j["title"]}'
+            t = f'{MARK[j["state"]]} {tr_title(j["title"])}'
             if j["state"] == "run":
                 if self.run.get("item"):
-                    t += "  ·  трек {} из {}".format(*self.run["item"])
+                    t += L("  ·  трек {} из {}", "  ·  track {} of {}").format(*self.run["item"])
                 elif self.run.get("gallery") and self.run.get("total"):
-                    t += f'  ·  файлов {self.run["done"]} из {self.run["total"]}'
+                    t += L(f'  ·  файлов {self.run["done"]} из {self.run["total"]}',
+                           f'  ·  files {self.run["done"]} of {self.run["total"]}')
             self.qlist.addItem(t)
         if 0 <= row < len(self.jobs):
             self.qlist.setCurrentRow(row)
@@ -578,7 +696,7 @@ class Window(QMainWindow):
         j = self.retry_job
         if j is None:
             return
-        if QMessageBox.question(self, "Резервные узлы", NODES_WARNING) == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, tr("Резервные узлы"), tr(NODES_WARNING)) == QMessageBox.StandardButton.Yes:
             nj = dict(j, args=j["args"] + ["--nodes"], state="wait", title=j["title"] + " (через узлы)")
             self.retry.setVisible(False)
             self.retry_job = None
@@ -835,7 +953,7 @@ class Window(QMainWindow):
                 if self.bar.maximum() == 0:
                     self.bar.setRange(0, 100)
                 self.bar.setValue(int(pct))
-            prefix = f"Трек {item[0]} из {item[1]} · " if item else ""
+            prefix = L(f"Трек {item[0]} из {item[1]} · ", f"Track {item[0]} of {item[1]} · ") if item else ""
             self.set_status(prefix + line[len("[download]"):].strip())
             return  # строки прогресса не засоряют лог
         self.append(line)
@@ -874,7 +992,7 @@ class Window(QMainWindow):
             state = "cancel"
         elif code == 0:
             self.finish_bar(True)
-            self.set_status("Готово: файлы в папке загрузок", "#66bb6a")
+            self.set_status("Готово: файлы в папке загрузок", OK_COLOR)
             state = "ok"
         else:
             state = "fail"
@@ -893,7 +1011,7 @@ class Window(QMainWindow):
             elif "stalled" in text and "нет прогресса" in text:
                 self.set_status("Нет прогресса, загрузка прервана", "#ef5350")
             elif explain(text):
-                self.set_status(explain(text) + " Подробности в логе.", "#ef5350")
+                self.set_status(tr(explain(text)) + L(" Подробности в логе.", " See the log for details."), "#ef5350")
             else:
                 self.set_status(f"Ошибка (код {code}), подробности в логе", "#ef5350")
         if job is not None:
@@ -904,7 +1022,7 @@ class Window(QMainWindow):
 
     # ---------- папка, отчёт, окружение ----------
     def choose_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Папка загрузок", downloads_dir())
+        d = QFileDialog.getExistingDirectory(self, tr("Папка загрузок"), downloads_dir())
         if not d:
             return
         path = os.path.join(BASE, "routedl.json")
@@ -954,7 +1072,36 @@ class Window(QMainWindow):
             v = ""
         msg = ("Движки обновлены: " + v) if code == 0 else "Не удалось обновить движки (сеть или pip)"
         self.append(msg)
-        self.set_status(msg, "#66bb6a" if code == 0 else "#ef5350", hold=True)
+        self.set_status(msg, OK_COLOR if code == 0 else "#ef5350", hold=True)
+
+    def retranslate(self):
+        for cls in (TLabel, TButton, TCheck):
+            for w in self.findChildren(cls):
+                w.retr()
+        self.url.setPlaceholderText(tr("Вставьте ссылку на видео, аудио или галерею"))
+        self.type.setItemText(0, tr("Видео"))
+        self.type.setItemText(1, tr("Аудио"))
+        self.open_btn.setText(tr("Открыть папку"))
+        self.folder_act.setText(tr("Изменить папку загрузок…"))
+        en = i18n.LANG == "en"
+        self.lang_btn.setText("RU" if en else "EN")
+        self.lang_btn.setToolTip(L("Переключить на English", "Switch to Russian"))
+        self.theme_btn.setText(tr("Светлая тема" if self.dark else "Тёмная тема"))
+        if self.jobs:
+            self.refresh_list()
+
+    def toggle_lang(self):
+        i18n.set_lang("ru" if i18n.LANG == "en" else "en")
+        save_cfg(lang=i18n.LANG)
+        self.retranslate()
+
+    def toggle_theme(self):
+        self.dark = not self.dark
+        apply_theme(QApplication.instance(), self.dark)
+        save_cfg(theme="dark" if self.dark else "light")
+        self.pl_label.setStyleSheet(f"color:{HINT_COLOR};")
+        self.bar.setStyleSheet(GREEN_BAR if self.bar.styleSheet() else "")
+        self.retranslate()
 
     def run_selftest(self):
         if self.dl is not None or self.st is not None:
@@ -987,9 +1134,10 @@ class Window(QMainWindow):
         if not out:
             self.set_status("Не удалось выполнить проверку сети", "#ef5350", hold=True)
             return
-        self.append(out)
+        for line in out.splitlines():
+            self.append(line)
         QGuiApplication.clipboard().setText(out)
-        self.set_status("Результат скопирован в буфер обмена: вставьте его в issue", "#66bb6a", hold=True)
+        self.set_status("Результат скопирован в буфер обмена: вставьте его в issue", OK_COLOR, hold=True)
 
     def after_info(self):
         if getattr(self, "want_add", False):
@@ -1029,7 +1177,9 @@ def main():
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("RouteDL.App")  # иконка в панели задач
     app = QApplication(sys.argv)
-    apply_dark(app)
+    cfg = load_cfg()
+    i18n.set_lang(cfg.get("lang") or ("ru" if QLocale.system().name().startswith("ru") else "en"))
+    apply_theme(app, cfg.get("theme") != "light")
     w = Window()
     w.show()
     return app.exec()
