@@ -94,3 +94,18 @@ Write-Host "устанавливаю зависимости (несколько 
 & $py -m pip install -q --no-warn-script-location -r "$root\requirements.txt"
 & $py -m yt_dlp --version
 & $py -m gallery_dl --version
+
+Write-Host "`n== Ярлыки =="
+try {
+    $ws = New-Object -ComObject WScript.Shell
+    foreach ($t in @("$([Environment]::GetFolderPath('Desktop'))\RouteDL.lnk", "$([Environment]::GetFolderPath('Programs'))\RouteDL.lnk")) {
+        $s = $ws.CreateShortcut($t)
+        $s.TargetPath = "$root\runtime\python\pythonw.exe"
+        $s.Arguments = "routedl_gui.py"
+        $s.WorkingDirectory = $root
+        $s.IconLocation = "$root\routedl.ico"
+        $s.Description = "RouteDL"
+        $s.Save()
+    }
+    Write-Host "ярлыки RouteDL созданы: рабочий стол и меню Пуск"
+} catch { Write-Host "ярлыки не созданы: $($_.Exception.Message)" -ForegroundColor Yellow }

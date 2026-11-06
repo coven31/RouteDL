@@ -34,7 +34,7 @@ If a site answers but files do not arrive within 45 s, RouteDL moves to the next
 
 1. Download or clone this repository.
 2. Double-click `install.bat`. It downloads a private portable Python 3.12 into the runtime folder (no system Python needed, nothing is installed system-wide), then xray, ByeDPI, ffmpeg and deno from their upstream releases (downloads are compared against the tested SHA256 values in `setup_env.ps1`).
-3. Double-click `RouteDL.bat`.
+3. Start RouteDL from the new desktop shortcut (or double-click `RouteDL.bat`).
 
 Antivirus software may flag `ciadpi.exe` and `xray.exe`, because they are network-bypass tools. Both tested builds showed 0 detections on VirusTotal. Whether to exclude them is your decision.
 
