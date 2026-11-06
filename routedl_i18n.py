@@ -218,6 +218,9 @@ def tr(text):
     if not core:
         return text
     pre, post = text[:len(text) - len(text.lstrip())], text[len(text.rstrip()):]
+    tail = " Подробности в логе."
+    if core.endswith(tail) and len(core) > len(tail):
+        return pre + tr(core[:-len(tail)]) + " See the log for details." + post
     if core in EN:
         return pre + EN[core] + post
     for rx, rep in PAT:

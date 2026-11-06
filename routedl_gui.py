@@ -1011,7 +1011,7 @@ class Window(QMainWindow):
             elif "stalled" in text and "нет прогресса" in text:
                 self.set_status("Нет прогресса, загрузка прервана", "#ef5350")
             elif explain(text):
-                self.set_status(tr(explain(text)) + L(" Подробности в логе.", " See the log for details."), "#ef5350")
+                self.set_status(explain(text) + " Подробности в логе.", "#ef5350")
             else:
                 self.set_status(f"Ошибка (код {code}), подробности в логе", "#ef5350")
         if job is not None:
@@ -1101,6 +1101,11 @@ class Window(QMainWindow):
         save_cfg(theme="dark" if self.dark else "light")
         self.pl_label.setStyleSheet(f"color:{HINT_COLOR};")
         self.bar.setStyleSheet(GREEN_BAR if self.bar.styleSheet() else "")
+        for w in self.findChildren(QWidget):  # виджеты со своим стилем кэшируют палитру: перечитываем
+            st = w.styleSheet()
+            if st:
+                w.setStyleSheet("")
+                w.setStyleSheet(st)
         self.retranslate()
 
     def run_selftest(self):

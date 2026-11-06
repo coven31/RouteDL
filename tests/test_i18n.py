@@ -77,6 +77,8 @@ class I18n(unittest.TestCase):
         self.assertEqual(i18n.tr("Название видео"), "Название видео")  # чужой текст не трогается
         self.assertEqual(i18n.tr_line("[RouteDL +5с] маршрут: напрямую"), "[RouteDL +5s] route: direct")
         self.assertEqual(i18n.tr_title("Мой ролик (плейлист, аудио)"), "Мой ролик (playlist, audio)")
+        self.assertEqual(i18n.tr("Видео удалено или недоступно. Подробности в логе."),
+                         "The video was removed or is unavailable. See the log for details.")
         i18n.set_lang("ru")
         self.assertEqual(i18n.tr("Скачать"), "Скачать")
 

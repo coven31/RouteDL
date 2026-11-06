@@ -16,7 +16,7 @@ HANDOFF*.md
 routedl_cli_v4_backup.py
 report.jsonl
 routedl.json
-
+checkpoint.md
 build/
 dist/
 *.spec
