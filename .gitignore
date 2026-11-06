@@ -10,7 +10,6 @@ diag_*.py
 dpi_strategy.json
 alive_chain.json
 node_*.json
-alive_chain.json
 last_run.txt
 HANDOFF*.md
 routedl_cli_v4_backup.py
@@ -33,12 +32,7 @@ queue.json
 
 suite_report.jsonl
 
-soak_urls.txt
-soak_report.jsonl
-suite_report.jsonl
 suite_summary.txt
-soak_logs/
-queue.json
 *.tmp
 *.xlsx
 runtime/
